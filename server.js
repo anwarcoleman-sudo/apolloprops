@@ -14,38 +14,25 @@
  *   ANTHROPIC_API_KEY = sk-ant-...
  *   ALLOWED_ORIGINS   = https://apolloprops.com,https://www.apolloprops.com
  */
-
+ 
 const express = require('express');
 const cors    = require('cors');
-
+ 
 const app = express();
 app.use(express.json());
-
+ 
 // ── CORS ──────────────────────────────────────────────────────────────────
 // Allow your HostGator domain to call this API
 // Add localhost:3000 for local testing
-const ALLOWED = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean)
-  .concat(['http://localhost:3000', 'http://127.0.0.1:5500', 'null']);
-
-app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests with no origin (Postman, curl) and allowed domains
-    if (!origin || ALLOWED.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.log('Blocked CORS from:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
-  }
-}));
-
+// Open CORS — allows any domain to call this API
+// This is intentional: the frontend is public HTML on HostGator
+// Security comes from the API key being server-side only
+app.use(cors());
+ 
 // ── ANTHROPIC HELPER ──────────────────────────────────────────────────────
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL         = 'claude-sonnet-4-20250514';
-
+ 
 async function callClaude(body) {
   if (!ANTHROPIC_KEY) {
     throw new Error('ANTHROPIC_API_KEY not set in environment variables');
@@ -65,11 +52,11 @@ async function callClaude(body) {
   }
   return response.json();
 }
-
+ 
 function getText(data) {
   return data.content?.map(c => c.text || '').join('') || '';
 }
-
+ 
 function parseJSON(text, fallback) {
   try {
     return JSON.parse(text.replace(/```json|```/g, '').trim());
@@ -78,7 +65,7 @@ function parseJSON(text, fallback) {
     return fallback;
   }
 }
-
+ 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
@@ -87,7 +74,7 @@ app.get('/', (req, res) => {
     key_set: !!ANTHROPIC_KEY
   });
 });
-
+ 
 // ── POST /api/ask-apollo ──────────────────────────────────────────────────
 // Used by machine.html for: pick analysis, parlay analysis, Ask Apollo chat
 // Body: { system: "...", messages: [...], max_tokens: 1000 }
@@ -105,23 +92,23 @@ app.post('/api/ask-apollo', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
+ 
 // ── POST /api/generate-picks ──────────────────────────────────────────────
 // Used by machine.html when user selects a sport
 // Body: { sport: "all|nba|mlb|nhl", date: "Tue May 13 2026" }
 app.post('/api/generate-picks', async (req, res) => {
   const sport = req.body.sport || 'all';
   const date  = req.body.date  || new Date().toDateString();
-
+ 
   const systemPrompt = `You are a sports betting data engine. Today: ${date}.
-
+ 
 TONIGHT'S GAMES:
 NBA PLAYOFFS:
 - SAS vs MIN Game 5 at 8PM ET (series tied 2-2, SAS won G1+G3, MIN won G2+G4)
 - DET vs CLE Game 5 at 8PM ET Wednesday (series tied 2-2)
 - OKC swept LAL 4-0 — DO NOT include OKC or LAL picks
 - NYK swept PHI 4-0 — NYK in ECF, no picks
-
+ 
 NBA TRENDS:
 - Anthony Edwards: 36pts G4, series avg 28+, unstoppable
 - Victor Wembanyama: only 4pts G4 due to foul trouble and ejection — big fade
@@ -131,14 +118,14 @@ NBA TRENDS:
 - Cade Cunningham: 23/25/27 — under his 30.6 avg all 3 games
 - Jalen Duren: boards declining 12/10/4 — foul trouble
 - Rudy Gobert: 13 rebounds G4
-
+ 
 MLB TONIGHT:
 NYY@BAL 6:35PM, PHI@BOS 6:45PM, LAA@CLE 6:10PM, TB@TOR 7:07PM,
 DET@NYM 7:10PM, CHC@ATL 7:15PM, SD@MIL 7:40PM, SEA@HOU 8:10PM,
 AZ@TEX 8:05PM, SF@LAD 10:10PM, STL@ATH 9:40PM
-
+ 
 NO NHL GAMES TONIGHT.
-
+ 
 Return ONLY valid compact JSON, no markdown, no explanation:
 {"picks":[{
   "id":"p1",
@@ -159,10 +146,10 @@ Return ONLY valid compact JSON, no markdown, no explanation:
   "gameLabel":"SAS vs MIN (G5)",
   "odds":"-145"
 }]}`;
-
+ 
   let pickCount = '18 picks';
   let instructions = '';
-
+ 
   if (sport === 'nba') {
     pickCount = '10 NBA picks';
     instructions = '5 player props from SAS vs MIN G5 (using real trends above), 2 player props from DET vs CLE (use Mitchell and Cunningham), 2 NBA team picks (ML or total for SAS vs MIN), 1 NBA team spread pick.';
@@ -180,7 +167,7 @@ Return ONLY valid compact JSON, no markdown, no explanation:
 2 bonus high-confidence picks of your choice from tonight.
 Use ONLY players from teams playing tonight.`;
   }
-
+ 
   try {
     const data = await callClaude({
       max_tokens: 1000,
@@ -198,7 +185,7 @@ Use ONLY players from teams playing tonight.`;
     res.json({ picks: [] });
   }
 });
-
+ 
 // ── GET /api/pick-of-day ──────────────────────────────────────────────────
 // Used by landing.html and machine.html for the Pick of the Day card
 app.get('/api/pick-of-day', async (req, res) => {
@@ -221,7 +208,7 @@ Return the single best play tonight as JSON only:
     res.json({ pick: null });
   }
 });
-
+ 
 // ── GET /api/picks-preview ────────────────────────────────────────────────
 // Used by landing.html — returns a handful of picks for the free preview
 app.get('/api/picks-preview', async (req, res) => {
@@ -240,7 +227,7 @@ Return 5 picks as JSON only (mix of NBA and MLB):
     res.json({ picks: [], total: 15 });
   }
 });
-
+ 
 // ── GET /api/record ───────────────────────────────────────────────────────
 // Used by landing.html for the win/loss record section
 // UPDATE THESE NUMBERS MANUALLY as your real record builds
@@ -255,18 +242,18 @@ app.get('/api/record', (req, res) => {
     note:   'Record tracking starts from launch'
   });
 });
-
+ 
 // ── POST /api/resolve-results ─────────────────────────────────────────────
 // Used by machine.html to auto-check if pending picks won or lost
 // Body: { picks: [{ id, player, sport, propType, line, direction, gameLabel, loggedDate }] }
 app.post('/api/resolve-results', async (req, res) => {
   const picks = req.body.picks || [];
   if (!picks.length) return res.json({ results: [] });
-
+ 
   const list = picks
     .map((p, i) => `${i+1}. ID:${p.id} | ${p.sport.toUpperCase()} | ${p.player} | ${p.direction.toUpperCase()} ${p.line} ${p.propType} | ${p.gameLabel} | Logged: ${p.loggedDate}`)
     .join('\n');
-
+ 
   try {
     const data = await callClaude({
       max_tokens: 600,
@@ -286,7 +273,7 @@ Return JSON only: {"results":[{"id":"...","result":"win|loss|pending|unknown","a
     res.json({ results: [] });
   }
 });
-
+ 
 // ── START SERVER ──────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
