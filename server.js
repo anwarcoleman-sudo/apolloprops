@@ -279,5 +279,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`ApolloProps API running on port ${PORT}`);
   console.log(`API key set: ${!!ANTHROPIC_KEY}`);
-  console.log(`Allowed origins: ${ALLOWED.join(', ')}`);
+  console.log('CORS: open to all origins');
 });
