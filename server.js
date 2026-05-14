@@ -260,20 +260,27 @@ app.post('/api/generate-picks', async (req, res) => {
  
   const gameContext = buildContext(todayET, sport);
  
-  const systemPrompt = 'You are a sports betting data engine. Today: ' + todayET + '.\n\n'
-    + gameContext + '\n'
-    + 'CRITICAL RULES:\n'
-    + '1. Only generate picks for games explicitly listed above.\n'
-    + '2. Never invent games, teams, or matchups not shown.\n'
-    + '3. Never pick OKC, LAL, NYK, or PHI players (their series are over).\n'
-    + '4. Use real player names only from the teams listed.\n\n'
-    + 'Return ONLY valid compact JSON, no markdown:\n'
+  const systemPrompt = 'You are ApolloProps, an AI sports pick generator. '
+    + 'Your job is to OUTPUT picks as JSON data — not to analyze or ask for more information. '
+    + 'You already have everything you need: the game schedule is provided below. '
+    + 'Use your training knowledge of player stats, team trends, and historical performance to assign lines, confidence scores, and reasons. '
+    + 'You do NOT need real-time odds. Estimate reasonable lines based on your knowledge. '
+    + 'NEVER say you need more data. NEVER refuse. ALWAYS return JSON picks. '
+    + 'Today is ' + todayET + '.\n\n'
+    + gameContext
+    + '\nNBA SERIES CONTEXT (use this for NBA picks):\n'
+    + 'CLE vs DET: CLE leads 3-2. Donovan Mitchell averaging 28pts, Evan Mobley 10reb. Cade Cunningham 25pts for DET.\n'
+    + 'SAS vs MIN: SAS leads 3-2. Anthony Edwards 28+pts avg, Rudy Gobert 13reb. De Aaron Fox leads SAS scoring.\n'
+    + 'OKC swept LAL — series over. NYK swept PHI — series over. Do not pick those teams.\n'
+    + '\nMLB CONTEXT: Use your knowledge of starting pitchers, batting averages, bullpen ERA, and park factors for the teams listed.\n'
+    + '\nReturn ONLY this JSON format, no markdown, no explanation, no refusals:\n'
     + '{"picks":[{"id":"p1","player":"Full Name","team":"ABBR","opp":"ABBR",'
-    + '"sport":"nba|mlb","time":"7:00 PM ET","propType":"pts|reb|ast|hits|tb|hr|rbi|str|sok|ml|spread|total",'
+    + '"sport":"nba|mlb","time":"7:00 PM ET",'
+    + '"propType":"pts|reb|ast|hits|tb|hr|rbi|str|sok|ml|spread|total",'
     + '"propLabel":"Points","line":24.5,"direction":"over|under",'
     + '"last5":[true,false,true,true,false],"confidence":78,'
-    + '"reason":"Max 12 words of real trend data",'
-    + '"recentScores":["G1: 23"],"gameKey":"CLE-DET","gameLabel":"CLE vs DET (G6)","odds":"-145"}]}';
+    + '"reason":"12 words max using real player trend",'
+    + '"recentScores":["23","28","31"],"gameKey":"CLE-DET","gameLabel":"CLE vs DET (G6)","odds":"-115"}]}';
  
   // Sport-specific instructions
   // Build the user message with EXPLICIT game list embedded
@@ -283,15 +290,17 @@ app.post('/api/generate-picks', async (req, res) => {
  
   if (sport === 'nba') {
     if (schedule.nba.length) {
-      instructions = 'Here are tonight\'s NBA games:\n' + schedule.nba.join('\n') +
-        '\n\nGenerate 8 NBA picks from these games: 5 player props + 2 team picks (ML or total) + 1 spread. Return JSON only.';
+      instructions = 'OUTPUT 8 NBA picks as JSON. Games tonight:\n' + schedule.nba.join('\n') +
+        '\n\nRequired: 5 player props (pts/reb/ast), 2 team picks (ML or total), 1 spread. ' +
+        'Use your knowledge of these players\' recent performance. Estimate lines. Return JSON only.';
     } else {
       instructions = 'There are no NBA games tonight. Return exactly: {"picks":[]}';
     }
   } else if (sport === 'mlb') {
     if (schedule.mlb.length) {
-      instructions = 'Here are today\'s MLB games:\n' + schedule.mlb.join('\n') +
-        '\n\nGenerate 12 MLB picks from these games: 4 pitcher strikeout props, 4 batter props (hits/total bases/HR), 2 team moneylines, 2 game totals. Return JSON only.';
+      instructions = 'OUTPUT 12 MLB picks as JSON. Games today:\n' + schedule.mlb.join('\n') +
+        '\n\nRequired: 4 pitcher strikeout props, 4 batter props (hits/total bases/HR), 2 team moneylines, 2 game totals. ' +
+        'Use your knowledge of starting pitchers and batting trends for these teams. Estimate lines. Return JSON only.';
     } else {
       instructions = 'There are no MLB games today. Return exactly: {"picks":[]}';
     }
@@ -313,9 +322,10 @@ app.post('/api/generate-picks', async (req, res) => {
       const nbaInstr = hasNBA ? '8 NBA picks (5 player props, 2 team picks, 1 spread)' : '0 NBA picks';
       const mlbInstr = hasMLB ? '8 MLB picks (3 pitcher Ks, 3 batter props, 1 ML, 1 total)' : '0 MLB picks';
  
-      instructions = gameList +
-        'Generate exactly: ' + nbaInstr + ' AND ' + mlbInstr + '.\n' +
-        'Only use players and teams from the games listed above. Return JSON only.';
+      instructions = 'OUTPUT picks as JSON. ' + gameList +
+        'Required output: ' + nbaInstr + ' AND ' + mlbInstr + '. ' +
+        'Use your knowledge of these teams and players. Estimate realistic lines. ' +
+        'Do not ask for more data. Do not refuse. Return JSON only.';
     }
   }
  
