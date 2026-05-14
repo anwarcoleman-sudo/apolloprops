@@ -72,9 +72,11 @@ const potdCache  = { pick: null, date: null };
 const SLATE_TTL = 5 * 60 * 1000; // 5 minutes
  
 function slateIsValid(sport) {
-  return slateCache.data &&
-         slateCache.sport === sport &&
-         (Date.now() - slateCache.ts) < SLATE_TTL;
+  if (!slateCache.data) return false;
+  if ((Date.now() - slateCache.ts) >= SLATE_TTL) return false;
+  // 'all' cache satisfies any sport request
+  if (slateCache.sport === 'all') return true;
+  return slateCache.sport === sport;
 }
 function picksAreValid(sport) {
   return picksCache.date === todayET() && picksCache.picks[sport]?.length;
@@ -196,7 +198,7 @@ async function buildSlate(sportFilter) {
       }
  
       // Fetch player props for first 3 games per sport
-      if (propsCount < 3 && (sport === 'nba' || sport === 'mlb')) {
+      if (propsCount < 3 && (sport === 'nba' || sport === 'mlb' || sport === 'wnba')) {
         gameObj.props = await fetchProps(key, g.id, g.away_team + ' @ ' + g.home_team);
         propsCount++;
       } else {
@@ -414,7 +416,11 @@ app.post('/api/generate-picks', async (req, res) => {
     try {
       console.log('[odds] fetching live slate for', sport);
       slate = await buildSlate(sport === 'all' ? 'all' : sport);
-      slateCache.data = slate; slateCache.sport = sport; slateCache.ts = Date.now();
+      // Always cache as 'all' if we fetched multiple sports
+      // This prevents a single-sport request from poisoning the cache
+      slateCache.data  = slate;
+      slateCache.sport = sportFilter === 'all' ? 'all' : sport;
+      slateCache.ts    = Date.now();
       console.log('[odds] slate fetched:', slate.games.length, 'games');
     } catch(e) {
       console.error('[odds] FETCH FAILED:', e.message);
