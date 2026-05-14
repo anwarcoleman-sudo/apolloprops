@@ -276,34 +276,46 @@ app.post('/api/generate-picks', async (req, res) => {
     + '"recentScores":["G1: 23"],"gameKey":"CLE-DET","gameLabel":"CLE vs DET (G6)","odds":"-145"}]}';
  
   // Sport-specific instructions
+  // Build the user message with EXPLICIT game list embedded
+  // This prevents Claude from saying "I don't have today's schedule"
   const schedule = getSchedule(todayET);
   let instructions = '';
+ 
   if (sport === 'nba') {
     if (schedule.nba.length) {
-      instructions = 'Generate 8 NBA picks: 5 player props + 2 team picks (ML/total) + 1 spread. Use only players from games listed.';
+      instructions = 'Here are tonight\'s NBA games:\n' + schedule.nba.join('\n') +
+        '\n\nGenerate 8 NBA picks from these games: 5 player props + 2 team picks (ML or total) + 1 spread. Return JSON only.';
     } else {
-      instructions = 'Return {"picks":[]} — no NBA games today.';
+      instructions = 'There are no NBA games tonight. Return exactly: {"picks":[]}';
     }
   } else if (sport === 'mlb') {
     if (schedule.mlb.length) {
-      instructions = 'Generate 12 MLB picks: 4 pitcher strikeout props, 4 batter props (hits/total bases/HR), 2 team moneylines, 2 game totals. Use only the games listed.';
+      instructions = 'Here are today\'s MLB games:\n' + schedule.mlb.join('\n') +
+        '\n\nGenerate 12 MLB picks from these games: 4 pitcher strikeout props, 4 batter props (hits/total bases/HR), 2 team moneylines, 2 game totals. Return JSON only.';
     } else {
-      instructions = 'Return {"picks":[]} — no MLB games today.';
+      instructions = 'There are no MLB games today. Return exactly: {"picks":[]}';
     }
   } else if (sport === 'nhl') {
-    instructions = 'Return {"picks":[]} — no NHL games this week.';
+    instructions = 'There are no NHL games this week. Return exactly: {"picks":[]}';
   } else {
-    // all sports
+    // all sports — embed full game list
     const hasNBA = schedule.nba.length > 0;
     const hasMLB = schedule.mlb.length > 0;
     if (!hasNBA && !hasMLB) {
-      instructions = 'Return {"picks":[]} — no games today.';
-    } else if (hasNBA && hasMLB) {
-      instructions = 'Generate 8 NBA picks (5 player props, 2 team picks, 1 spread) AND 8 MLB picks (3 pitcher Ks, 3 batter props, 1 ML, 1 total). Only use listed games.';
-    } else if (hasNBA) {
-      instructions = 'Generate 10 NBA picks only (5 player props, 3 team picks, 2 spreads). No MLB or NHL today.';
+      instructions = 'There are no games today across any sport. Return exactly: {"picks":[]}';
     } else {
-      instructions = 'Generate 12 MLB picks only (4 pitcher Ks, 4 batter props, 2 MLs, 2 totals). No NBA or NHL today.';
+      let gameList = '';
+      if (hasNBA) gameList += 'NBA GAMES TONIGHT:\n' + schedule.nba.join('\n') + '\n\n';
+      if (hasMLB) gameList += 'MLB GAMES TODAY:\n' + schedule.mlb.join('\n') + '\n\n';
+      if (!hasNBA) gameList += 'NO NBA games today.\n\n';
+      if (!hasMLB) gameList += 'NO MLB games today.\n\n';
+ 
+      const nbaInstr = hasNBA ? '8 NBA picks (5 player props, 2 team picks, 1 spread)' : '0 NBA picks';
+      const mlbInstr = hasMLB ? '8 MLB picks (3 pitcher Ks, 3 batter props, 1 ML, 1 total)' : '0 MLB picks';
+ 
+      instructions = gameList +
+        'Generate exactly: ' + nbaInstr + ' AND ' + mlbInstr + '.\n' +
+        'Only use players and teams from the games listed above. Return JSON only.';
     }
   }
  
