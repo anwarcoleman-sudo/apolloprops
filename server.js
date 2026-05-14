@@ -9,12 +9,12 @@
  * To update picks for new dates: edit GAME_SCHEDULE below.
  * To update the record: edit /api/record below.
  */
-
+ 
 const express = require('express');
 const cors    = require('cors');
 const app     = express();
 app.use(express.json());
-
+ 
 // ── CORS ──────────────────────────────────────────────────────────────────
 app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -30,11 +30,11 @@ app.use((req, res, next) => {
   next();
 });
 app.use(cors({ origin: '*', optionsSuccessStatus: 200 }));
-
+ 
 // ── ANTHROPIC ─────────────────────────────────────────────────────────────
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL         = 'claude-sonnet-4-20250514';
-
+ 
 async function callClaude(body) {
   if (!ANTHROPIC_KEY) throw new Error('ANTHROPIC_API_KEY not set');
   console.log('Calling Anthropic:', MODEL, 'max_tokens:', body.max_tokens);
@@ -55,11 +55,11 @@ async function callClaude(body) {
   }
   return r.json();
 }
-
+ 
 function getText(data) {
   return data.content?.map(c => c.text || '').join('') || '';
 }
-
+ 
 function parseJSON(text, fallback) {
   try {
     return JSON.parse(text.replace(/```json|```/g, '').trim());
@@ -68,12 +68,12 @@ function parseJSON(text, fallback) {
     return fallback;
   }
 }
-
+ 
 // ── DAILY CACHE ───────────────────────────────────────────────────────────
 // Picks generate ONCE per day. Everyone gets cached picks after the first load.
 // Cache auto-clears at midnight ET.
 const cache = { date: null, picks: {}, potd: null, potdDate: null };
-
+ 
 function getTodayET() {
   return new Date().toLocaleDateString('en-US', {
     timeZone: 'America/New_York',
@@ -81,7 +81,7 @@ function getTodayET() {
   });
 }
 function isCacheValid() { return cache.date && cache.date === getTodayET(); }
-
+ 
 function clearAtMidnight() {
   const now    = new Date();
   const etNow  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
@@ -95,7 +95,7 @@ function clearAtMidnight() {
   console.log('Cache clears in ' + Math.round(ms / 60000) + ' minutes');
 }
 clearAtMidnight();
-
+ 
 // ── GAME SCHEDULE ─────────────────────────────────────────────────────────
 // Update this weekly. Keys must match getTodayET() format exactly.
 // Example: 'Thu, May 14, 2026'
@@ -110,9 +110,9 @@ clearAtMidnight();
 //   SAS leads MIN 3-2  (SAS won G5 126-97 on May 12)
 //   OKC swept LAL 4-0  — DO NOT pick OKC or LAL
 //   NYK swept PHI 4-0  — DO NOT pick NYK or PHI
-
+ 
 const SCHEDULE = {
-
+ 
   'Thu, May 14, 2026': {
     nba: [],
     mlb: [
@@ -124,7 +124,7 @@ const SCHEDULE = {
     nhl: [],
     notes: 'No NBA today. No NYY or BAL today.'
   },
-
+ 
   'Fri, May 15, 2026': {
     nba: [
       'DET @ CLE G6 7:00 PM ET — CLE leads series 3-2 (Donovan Mitchell avg 28pts, Cade Cunningham avg 25pts)',
@@ -140,7 +140,7 @@ const SCHEDULE = {
     nhl: [],
     notes: 'Big NBA night — two G6 games. NYY plays NYM tonight.'
   },
-
+ 
   'Sat, May 16, 2026': {
     nba: [],
     mlb: [
@@ -153,7 +153,7 @@ const SCHEDULE = {
     nhl: [],
     notes: 'No NBA Saturday. G7s if needed are Sunday May 17.'
   },
-
+ 
   'Sun, May 17, 2026': {
     nba: [
       'POSSIBLE G7: DET vs CLE — only if series tied 3-3 after Friday',
@@ -167,17 +167,17 @@ const SCHEDULE = {
     nhl: [],
     notes: 'NBA G7s only if both series went to 7 games on Friday.'
   }
-
+ 
 };
-
+ 
 function getSchedule(dateStr) {
   return SCHEDULE[dateStr] || { nba: [], mlb: [], nhl: [], notes: 'Schedule TBD for this date.' };
 }
-
+ 
 function buildContext(dateStr, sport) {
   const s = getSchedule(dateStr);
   let ctx = '';
-
+ 
   // NBA
   if (sport === 'nba' || sport === 'all') {
     if (s.nba.length) {
@@ -187,7 +187,7 @@ function buildContext(dateStr, sport) {
       ctx += 'NO NBA GAMES TODAY. Generate 0 NBA picks.\n\n';
     }
   }
-
+ 
   // MLB
   if (sport === 'mlb' || sport === 'all') {
     if (s.mlb.length) {
@@ -197,12 +197,12 @@ function buildContext(dateStr, sport) {
       ctx += 'NO MLB GAMES TODAY. Generate 0 MLB picks.\n\n';
     }
   }
-
+ 
   if (s.notes) ctx += 'NOTE: ' + s.notes + '\n';
   ctx += 'NO NHL games this week.\n';
   return ctx;
 }
-
+ 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   const todayET = getTodayET();
@@ -217,10 +217,10 @@ app.get('/', (req, res) => {
     potd_cached:  !!cache.potd
   });
 });
-
+ 
 app.get('/api/ask-apollo',    (req, res) => res.json({ status: 'ok', method: 'POST required' }));
 app.get('/api/generate-picks',(req, res) => res.json({ status: 'ok', method: 'POST required' }));
-
+ 
 // ── POST /api/ask-apollo ──────────────────────────────────────────────────
 app.post('/api/ask-apollo', async (req, res) => {
   try {
@@ -237,12 +237,12 @@ app.post('/api/ask-apollo', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
+ 
 // ── POST /api/generate-picks ──────────────────────────────────────────────
 app.post('/api/generate-picks', async (req, res) => {
   const sport   = req.body.sport || 'all';
   const todayET = getTodayET();
-
+ 
   // Serve from cache if available
   if (isCacheValid() && cache.picks[sport]) {
     console.log('Serving cached picks for', sport, '—', cache.picks[sport].length, 'picks');
@@ -255,11 +255,11 @@ app.post('/api/generate-picks', async (req, res) => {
       return res.json({ picks: filtered, date: todayET, cached: true });
     }
   }
-
+ 
   console.log('Generating fresh picks — sport:', sport, 'date:', todayET);
-
+ 
   const gameContext = buildContext(todayET, sport);
-
+ 
   const systemPrompt = 'You are a sports betting data engine. Today: ' + todayET + '.\n\n'
     + gameContext + '\n'
     + 'CRITICAL RULES:\n'
@@ -274,7 +274,7 @@ app.post('/api/generate-picks', async (req, res) => {
     + '"last5":[true,false,true,true,false],"confidence":78,'
     + '"reason":"Max 12 words of real trend data",'
     + '"recentScores":["G1: 23"],"gameKey":"CLE-DET","gameLabel":"CLE vs DET (G6)","odds":"-145"}]}';
-
+ 
   // Sport-specific instructions
   const schedule = getSchedule(todayET);
   let instructions = '';
@@ -306,7 +306,7 @@ app.post('/api/generate-picks', async (req, res) => {
       instructions = 'Generate 12 MLB picks only (4 pitcher Ks, 4 batter props, 2 MLs, 2 totals). No NBA or NHL today.';
     }
   }
-
+ 
   try {
     const data = await callClaude({
       max_tokens: 1000,
@@ -320,7 +320,7 @@ app.post('/api/generate-picks', async (req, res) => {
       p.player && p.sport && p.propType && p.line !== undefined && p.direction
     );
     console.log('Valid picks:', valid.length);
-
+ 
     // Store in cache
     if (!isCacheValid()) { cache.date = getTodayET(); cache.picks = {}; }
     cache.picks[sport] = valid;
@@ -328,24 +328,24 @@ app.post('/api/generate-picks', async (req, res) => {
       ['nba','mlb','nhl'].forEach(s => { cache.picks[s] = valid.filter(p => p.sport === s); });
     }
     console.log('Cached', valid.length, 'picks for', sport, 'on', cache.date);
-
+ 
     res.json({ picks: valid, date: getTodayET(), cached: false });
   } catch(e) {
     console.error('/api/generate-picks error:', e.message);
     res.json({ picks: [] });
   }
 });
-
+ 
 // ── GET /api/pick-of-day ──────────────────────────────────────────────────
 app.get('/api/pick-of-day', async (req, res) => {
   const todayET = getTodayET();
-
+ 
   // Use cached POTD
   if (cache.potd && cache.potdDate === todayET) {
     console.log('Serving cached POTD');
     return res.json({ pick: cache.potd, cached: true });
   }
-
+ 
   // Derive from cached picks if available
   if (isCacheValid() && cache.picks['all']?.length) {
     const top = [...cache.picks['all']].sort((a,b) => b.confidence - a.confidence)[0];
@@ -353,12 +353,12 @@ app.get('/api/pick-of-day', async (req, res) => {
     console.log('POTD derived from cache:', top.player);
     return res.json({ pick: top, cached: true });
   }
-
+ 
   // Generate from today's schedule
   const schedule = getSchedule(todayET);
   const games    = [...(schedule.nba || []), ...(schedule.mlb || [])];
   const gamesCtx = games.length ? games.join(', ') : 'no games today';
-
+ 
   try {
     const data = await callClaude({
       max_tokens: 400,
@@ -377,7 +377,7 @@ app.get('/api/pick-of-day', async (req, res) => {
     res.json({ pick: null });
   }
 });
-
+ 
 // ── GET /api/picks-preview ────────────────────────────────────────────────
 app.get('/api/picks-preview', async (req, res) => {
   // Serve from cache if picks already generated today
@@ -385,11 +385,11 @@ app.get('/api/picks-preview', async (req, res) => {
     const preview = cache.picks['all'].slice(0, 5);
     return res.json({ picks: preview, total: cache.picks['all'].length, cached: true });
   }
-
+ 
   const todayET = getTodayET();
   const schedule = getSchedule(todayET);
   const games    = [...(schedule.nba || []), ...(schedule.mlb || [])].slice(0, 5);
-
+ 
   try {
     const data = await callClaude({
       max_tokens: 500,
@@ -407,13 +407,13 @@ app.get('/api/picks-preview', async (req, res) => {
     res.json({ picks: [], total: 15 });
   }
 });
-
+ 
 // ── GET /api/record ───────────────────────────────────────────────────────
 // UPDATE these numbers as your real record builds
 app.get('/api/record', (req, res) => {
   res.json({ wins: 18, losses: 9, pct: 67, units: 6.2 });
 });
-
+ 
 // ── POST /api/resolve-results ─────────────────────────────────────────────
 app.post('/api/resolve-results', async (req, res) => {
   const picks = req.body.picks || [];
@@ -438,7 +438,51 @@ app.post('/api/resolve-results', async (req, res) => {
     res.json({ results: [] });
   }
 });
-
+ 
+// ── GET /api/schedule ────────────────────────────────────────────────────
+// Returns today's game slate so the machine can display real games
+app.get('/api/schedule', (req, res) => {
+  const todayET  = getTodayET();
+  const schedule = getSchedule(todayET);
+ 
+  // If no NBA today, find the next date that has NBA games
+  let nextNBA = null;
+  if(!schedule.nba || !schedule.nba.length){
+    const allDates = Object.keys(SCHEDULE).sort();
+    for(const d of allDates){
+      if(d > todayET && SCHEDULE[d].nba && SCHEDULE[d].nba.length){
+        nextNBA = { date: d, games: SCHEDULE[d].nba };
+        break;
+      }
+    }
+  }
+ 
+  // If no MLB today, find the next date that has MLB games
+  let nextMLB = null;
+  if(!schedule.mlb || !schedule.mlb.length){
+    const allDates = Object.keys(SCHEDULE).sort();
+    for(const d of allDates){
+      if(d > todayET && SCHEDULE[d].mlb && SCHEDULE[d].mlb.length){
+        nextMLB = { date: d, games: SCHEDULE[d].mlb };
+        break;
+      }
+    }
+  }
+ 
+  res.json({
+    date:     todayET,
+    nba:      schedule.nba  || [],
+    mlb:      schedule.mlb  || [],
+    nhl:      schedule.nhl  || [],
+    notes:    schedule.notes || '',
+    nbaCount: (schedule.nba  || []).length,
+    mlbCount: (schedule.mlb  || []).length,
+    nhlCount: (schedule.nhl  || []).length,
+    nextNBA:  nextNBA,
+    nextMLB:  nextMLB
+  });
+});
+ 
 // ── START ─────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
