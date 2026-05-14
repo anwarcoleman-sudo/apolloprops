@@ -293,9 +293,11 @@ function getText(d) { return d.content?.map(c => c.text || '').join('') || ''; }
 // ── PICK SCHEMA ───────────────────────────────────────────────────────────
 const PICK_SCHEMA = '{"picks":['
   + '{"id":"p1",'
-  + '"player":"Full Name or Team Name",'
+  // PLAYER PROPS: player = real player full name e.g. "LeBron James", "Shohei Ohtani"
+  // TEAM PICKS:  player = team name e.g. "Los Angeles Lakers", "New York Yankees"
+  + '"player":"REQUIRED — real player full name for props, team name for ML/spread/total",'
   + '"team":"ABBR","opp":"ABBR",'
-  + '"sport":"nba|mlb|nhl",'
+  + '"sport":"nba|mlb|nhl|wnba",'
   + '"time":"7:00 PM ET",'
   + '"propType":"pts|reb|ast|hits|tb|hr|rbi|str|ml|spread|total",'
   + '"propLabel":"Points",'
@@ -446,14 +448,20 @@ app.post('/api/generate-picks', async (req, res) => {
   const slatePrompt = slateToPrompt({ ...slate, games: relevantGames }, sport);
  
   const system =
-    'You are ApolloProps, a sports betting analysis engine. '
-    + 'You will receive a verified live game slate with real sportsbook odds. '
-    + 'Your ONLY job is to return picks as JSON from the games in this slate. '
-    + 'You have FULL permission to generate picks from this verified data. '
-    + 'Do NOT say you need more information. Do NOT refuse. '
-    + 'Do NOT add games not in the slate. '
-    + 'Use the actual lines and odds shown. '
-    + 'Return ONLY valid JSON matching this schema exactly, no markdown:\n'
+    'You are ApolloProps, a sports betting data engine. '
+    + 'You will receive a verified live slate with real sportsbook odds including player props. '
+    + '\n\nCRITICAL RULES FOR THE player FIELD:\n'
+    + '- For player prop picks (pts, reb, ast, hits, hr, tb, str, etc): '
+    +   'player = the REAL FULL NAME of the player e.g. "LeBron James", "Shohei Ohtani", "Caitlin Clark". '
+    +   'Use the exact player names shown in the PROPS section of the slate. '
+    +   'NEVER put a team name or abbreviation in the player field for a prop pick.\n'
+    + '- For team picks (ml, spread, total): '
+    +   'player = the full team name e.g. "Los Angeles Lakers", "New York Yankees".\n'
+    + '\nOTHER RULES:\n'
+    + '- Only generate picks from games in the slate. '
+    + '- Do NOT refuse or ask for more data. '
+    + '- Use real lines and odds from the slate. '
+    + '- Return ONLY valid JSON, no markdown:\n'
     + PICK_SCHEMA;
  
   const sportInstr = {
@@ -467,7 +475,8 @@ app.post('/api/generate-picks', async (req, res) => {
   const userMsg = 'Here is today\'s verified live slate with real sportsbook odds:\n\n'
     + slatePrompt
     + '\nGenerate ' + sportInstr + '. '
-    + 'Use the actual lines from the slate. Return JSON only.';
+    + 'IMPORTANT: For every player prop pick, use the exact player name from the PROPS section. '
+    + 'Do not use team names for prop picks. Return JSON only.';
  
   console.log('[claude] sending slate:', relevantGames.length, 'games to analyze');
  
