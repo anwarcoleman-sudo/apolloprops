@@ -66,6 +66,105 @@ function isCacheValid(){
   return picksCache.date && picksCache.date === getTodayET();
 }
  
+// ── GAME SCHEDULE LOOKUP ─────────────────────────────────────────────
+// Keyed by ET date string. Update weekly as schedule is released.
+// NBA: Verified from official schedule. MLB: rotates daily.
+const GAME_SCHEDULE = {
+ 
+  // ── THURSDAY MAY 14 ──────────────────────────────────────────────
+  'Thu, May 14, 2026': {
+    nba: [], // No NBA games
+    mlb: [
+      'PIT @ COL 12:35 PM ET', 'CIN @ WSH 12:40 PM ET', 'DET @ NYM 1:10 PM ET',
+      'SD @ MIL 1:40 PM ET', 'MIA @ MIN 1:40 PM ET', 'SEA @ HOU 2:10 PM ET',
+      'STL @ ATH 3:05 PM ET', 'PHI @ BOS 6:45 PM ET', 'CHC @ ATL 7:15 PM ET',
+      'KC @ CWS 7:40 PM ET', 'LAD @ SF 10:10 PM ET'
+    ],
+    nhl: [],
+    notes: 'No NYY or BAL today. No NBA today.'
+  },
+ 
+  // ── FRIDAY MAY 15 ────────────────────────────────────────────────
+  'Fri, May 15, 2026': {
+    nba: [
+      'DET @ CLE G6 7:00 PM ET (CLE leads series 3-2)',
+      'SAS @ MIN G6 9:30 PM ET (SAS leads series 3-2)'
+    ],
+    mlb: [
+      'PIT @ PHI 6:40 PM ET', 'BAL @ WSH 6:45 PM ET', 'TOR @ DET 6:45 PM ET',
+      'MIL @ MIN 7:10 PM ET', 'CIN @ CLE 7:10 PM ET', 'MIA @ TB 7:10 PM ET',
+      'BOS @ ATL 7:15 PM ET', 'NYY @ NYM 7:15 PM ET', 'CHC @ CWS 7:40 PM ET',
+      'TEX @ HOU 8:10 PM ET', 'KC @ STL 8:15 PM ET', 'AZ @ COL 8:40 PM ET',
+      'LAD @ LAA 9:38 PM ET', 'SD @ SEA 9:40 PM ET', 'SF @ ATH 9:40 PM ET'
+    ],
+    nhl: [],
+    notes: 'NBA: DET vs CLE G6 and SAS vs MIN G6. Big NBA night.'
+  },
+ 
+  // ── SATURDAY MAY 16 ──────────────────────────────────────────────
+  'Sat, May 16, 2026': {
+    nba: [], // G7s if needed would be Sunday May 17
+    mlb: [
+      'TOR @ DET 1:10 PM ET', 'KC @ STL 2:15 PM ET', 'AZ @ COL 3:10 PM ET',
+      'BAL @ WSH 4:05 PM ET'
+      // More games TBD
+    ],
+    nhl: [],
+    notes: 'No NBA Saturday. G7s if needed on Sunday May 17.'
+  },
+ 
+  // ── SUNDAY MAY 17 ────────────────────────────────────────────────
+  // G7s only if series are tied after Friday
+  'Sun, May 17, 2026': {
+    nba: [
+      'POTENTIAL G7: DET vs CLE (if series tied 3-3)',
+      'POTENTIAL G7: SAS vs MIN (if series tied 3-3)'
+    ],
+    mlb: [], // TBD
+    nhl: [],
+    notes: 'G7s only if both series go to 7. Check Friday results.'
+  }
+};
+ 
+function getScheduleForDate(dateStr) {
+  // Try exact match first
+  if (GAME_SCHEDULE[dateStr]) return GAME_SCHEDULE[dateStr];
+  // Return empty schedule if no data
+  return { nba: [], mlb: [], nhl: [], notes: 'Schedule not yet available for this date.' };
+}
+ 
+function buildGameContext(dateStr, sport) {
+  const schedule = getScheduleForDate(dateStr);
+  const nbaGames  = schedule.nba  || [];
+  const mlbGames  = schedule.mlb  || [];
+  const notes     = schedule.notes || '';
+ 
+  let ctx = '';
+ 
+  if ((sport === 'nba' || sport === 'all') && nbaGames.length > 0) {
+    ctx += 'NBA GAMES TODAY:\n' + nbaGames.join('\n') + '\n';
+    ctx += 'NBA SERIES STATUS (May 2026):\n';
+    ctx += '- CLE vs DET: CLE leads 3-2. Donovan Mitchell 28pts avg. Cade Cunningham 25pts avg.\n';
+    ctx += '- SAS vs MIN: SAS leads 3-2. Anthony Edwards 28+ avg. De Aaron Fox leads SAS.\n';
+    ctx += '- OKC swept LAL 4-0. DO NOT pick OKC or LAL players.\n';
+    ctx += '- NYK swept PHI 4-0. DO NOT pick NYK or PHI players.\n';
+  } else if (sport === 'nba' || sport === 'all') {
+    ctx += 'NO NBA GAMES TODAY. Do not generate NBA picks.\n';
+  }
+ 
+  if ((sport === 'mlb' || sport === 'all') && mlbGames.length > 0) {
+    ctx += 'MLB GAMES TODAY:\n' + mlbGames.join('\n') + '\n';
+    ctx += 'ONLY pick players from the teams listed above. Never invent games.\n';
+  } else if (sport === 'mlb' || sport === 'all') {
+    ctx += 'No MLB games confirmed for today. Do not generate MLB picks.\n';
+  }
+ 
+  if (notes) ctx += 'NOTES: ' + notes + '\n';
+  ctx += 'NO NHL games this week.\n';
+ 
+  return ctx;
+}
+ 
 function clearCacheAtMidnight(){
   const now    = new Date();
   const nextET = new Date(now.toLocaleString('en-US',{timeZone:'America/New_York'}));
@@ -79,7 +178,7 @@ function clearCacheAtMidnight(){
     console.log('Daily picks cache cleared at midnight ET');
     clearCacheAtMidnight(); // schedule next midnight clear
   }, msUntilMidnight);
-  console.log(`Cache will clear in ${Math.round(msUntilMidnight/1000/60)} minutes`);
+  console.log('Cache will clear in ' + Math.round(msUntilMidnight/1000/60) + ' minutes');
 }
 clearCacheAtMidnight();
 const MODEL         = 'claude-sonnet-4-20250514';
@@ -186,31 +285,46 @@ app.post('/api/generate-picks', async (req, res) => {
   const date = todayET;
   console.log(`Generating fresh picks for ${sport} on ${date}`);
  
-  const systemPrompt = `You are a sports betting data engine. Today: ${date}.
+  // Build game schedule dynamically — update this block as season progresses
+  const todayName = new Date(date).toLocaleDateString('en-US',{timeZone:'America/New_York',weekday:'long'});
  
-TONIGHT'S GAMES:
-NBA PLAYOFFS:
-- SAS vs MIN Game 5 at 8PM ET (series tied 2-2, SAS won G1+G3, MIN won G2+G4)
-- DET vs CLE Game 5 at 8PM ET Wednesday (series tied 2-2)
-- OKC swept LAL 4-0 — DO NOT include OKC or LAL picks
-- NYK swept PHI 4-0 — NYK in ECF, no picks
+  // ── ACCURATE AS OF MAY 14 2026 ────────────────────────────────────────
+  // NBA: No games Thursday May 14. G6 games on Friday May 15.
+  // CLE leads DET 3-2 (CLE won G5 117-113 on May 13)
+  // SAS leads MIN 3-2 (SAS won G5 126-97 on May 12)
+  // OKC swept LAL 4-0 — OKC in WCF. DO NOT pick OKC or LAL.
+  // NYK swept PHI 4-0 — NYK in ECF. DO NOT pick NYK or PHI.
+  //
+  // MLB THURSDAY MAY 14: PIT@COL 12:35ET, CIN@WSH 12:40ET, DET@NYM 1:10ET,
+  //   SD@MIL 1:40ET, MIA@MIN 1:40ET, SEA@HOU 2:10ET, STL@ATH 3:05ET,
+  //   PHI@BOS 6:45ET, CHC@ATL 7:15ET, KC@CWS 7:40ET, LAD@SF 10:10ET
+  //   NOTE: NO NYY or BAL games today. NO Gerrit Cole today.
+  // ─────────────────────────────────────────────────────────────────────
  
-NBA TRENDS:
-- Anthony Edwards: 36pts G4, series avg 28+, unstoppable
-- Victor Wembanyama: only 4pts G4 due to foul trouble and ejection — big fade
-- Dylan Harper (SAS): 24pts on 72% FG in G4 — hot hand
-- De'Aaron Fox: 24pts but 34.8% FG — inefficient
-- Donovan Mitchell: 23/31/35 rising each game at home
-- Cade Cunningham: 23/25/27 — under his 30.6 avg all 3 games
-- Jalen Duren: boards declining 12/10/4 — foul trouble
-- Rudy Gobert: 13 rebounds G4
+  const NBA_SCHEDULE = sport === 'nba' || sport === 'all' ? `
+NBA PLAYOFF STATUS (May 14 2026):
+- NO NBA GAMES TODAY (Thursday May 14). Return 0 NBA picks.
+- Next NBA: Friday May 15 — CLE @ DET G6 7:00PM ET, MIN @ SAS G6 9:30PM ET
+- Series: CLE leads DET 3-2. SAS leads MIN 3-2.
+- OKC swept LAL — DO NOT pick OKC or LAL players.
+- NYK swept PHI — DO NOT pick NYK or PHI players.
+` : '';
  
-MLB TONIGHT:
-NYY@BAL 6:35PM, PHI@BOS 6:45PM, LAA@CLE 6:10PM, TB@TOR 7:07PM,
-DET@NYM 7:10PM, CHC@ATL 7:15PM, SD@MIL 7:40PM, SEA@HOU 8:10PM,
-AZ@TEX 8:05PM, SF@LAD 10:10PM, STL@ATH 9:40PM
+  const MLB_SCHEDULE = `
+MLB GAMES TODAY (${date}):
+PHI @ BOS 6:45PM ET | CHC @ ATL 7:15PM ET | KC @ CWS 7:40PM ET | LAD @ SF 10:10PM ET
+PIT @ COL 12:35PM ET | CIN @ WSH 12:40PM ET | DET @ NYM 1:10PM ET
+SD @ MIL 1:40PM ET | MIA @ MIN 1:40PM ET | SEA @ HOU 2:10PM ET | STL @ ATH 3:05PM ET
+IMPORTANT: NO NYY game today. NO BAL game today. NO Gerrit Cole picks today.
+Only generate picks for teams listed above.`;
  
-NO NHL GAMES TONIGHT.
+  const gameContext = buildGameContext(date, sport);
+  const systemPrompt = `You are a sports betting data engine. Today: ${date} (${todayName}).
+${gameContext}
+NO NHL games tonight.
+ 
+CRITICAL: Only generate picks for matchups explicitly listed above.
+Never invent games. Never use players from teams not listed.
  
 Return ONLY valid compact JSON, no markdown, no explanation:
 {"picks":[{
@@ -237,21 +351,18 @@ Return ONLY valid compact JSON, no markdown, no explanation:
   let instructions = '';
  
   if (sport === 'nba') {
-    pickCount = '10 NBA picks';
-    instructions = '5 player props from SAS vs MIN G5 (using real trends above), 2 player props from DET vs CLE (use Mitchell and Cunningham), 2 NBA team picks (ML or total for SAS vs MIN), 1 NBA team spread pick.';
+    pickCount = '0 picks';
+    instructions = 'Return empty picks array — no NBA games on Thursday May 14. Next NBA games are Friday May 15 (CLE@DET G6, MIN@SAS G6).';
   } else if (sport === 'mlb') {
-    pickCount = '11 MLB picks';
-    instructions = '6 MLB player props (mix of hits, total bases, HR, pitcher Ks from real games listed), 3 MLB team moneylines, 2 MLB game totals.';
+    pickCount = '12 MLB picks';
+    instructions = 'Generate 12 MLB picks using ONLY the games listed in MLB_TODAY. Mix: 4 pitcher strikeout props, 4 batter props (hits/total bases/HR), 2 team moneylines, 2 game totals. Use specific pitchers for each game if known. Never use NYY or BAL — they are off today.';
   } else if (sport === 'nhl') {
     pickCount = '0 picks';
     instructions = 'Return empty picks array — no NHL games tonight.';
   } else {
-    instructions = `5 NBA player props (SAS vs MIN + DET vs CLE players using real trends),
-2 NBA team picks (SAS ML, SAS/MIN total),
-6 MLB player props (real players from games listed),
-3 MLB team picks (moneylines/totals),
-2 bonus high-confidence picks of your choice from tonight.
-Use ONLY players from teams playing tonight.`;
+    // All sports
+    pickCount = '12 picks';
+    instructions = 'No NBA today. Generate 12 MLB picks only using the games in MLB_TODAY. Mix pitcher Ks, batter props (hits/TB/HR), team MLs and game totals. Never use NYY or BAL today. No NHL games tonight.';
   }
  
   try {
@@ -315,12 +426,9 @@ app.get('/api/pick-of-day', async (req, res) => {
   try {
     const data = await callClaude({
       max_tokens: 400,
-      system: `Sports betting analyst. Today: ${date}.
-Tonight: SAS vs MIN G5 (Anthony Edwards 36pts G4, avg 28+ this series),
-Wembanyama only 4pts G4 due to foul trouble.
-MLB: Gerrit Cole starts for NYY (7.4 K/start avg).
-Return the single best play tonight as JSON only:
-{"pick":{"player":"","team":"","opp":"","sport":"nba","time":"","propType":"pts","propLabel":"Points","line":0,"direction":"over","confidence":0,"odds":"","last5":[true,true,false,true,true],"reason":"compelling reason in 15 words"}}`,
+      system: `Sports betting analyst. Today: ${date}. No NBA games today (Thursday May 14).
+MLB today: PHI@BOS 6:45ET, CHC@ATL 7:15ET, LAD@SF 10:10ET, KC@CWS 7:40ET, DET@NYM 1:10ET, SD@MIL 1:40ET, SEA@HOU 2:10ET. NO NYY or BAL today.
+Return the single best MLB pick as JSON only: {"pick":{"player":"","team":"","opp":"","sport":"mlb","time":"","propType":"hits","propLabel":"Hits","line":0,"direction":"over","confidence":0,"odds":"","last5":[true,true,false,true,true],"reason":""}}`,
       messages: [{ role: 'user', content: 'What is the single best play tonight based on the strongest trend and matchup? Pick one specific player or team bet.' }]
     });
     const result = parseJSON(getText(data), { pick: null });
