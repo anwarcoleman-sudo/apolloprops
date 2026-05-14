@@ -24,10 +24,17 @@ app.use(express.json());
 // ── CORS ──────────────────────────────────────────────────────────────────
 // Allow your HostGator domain to call this API
 // Add localhost:3000 for local testing
-// Open CORS — allows any domain to call this API
-// This is intentional: the frontend is public HTML on HostGator
-// Security comes from the API key being server-side only
-app.use(cors());
+// Explicit CORS headers — handles browser preflight OPTIONS requests
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+app.use(cors({ origin: '*' }));
  
 // ── ANTHROPIC HELPER ──────────────────────────────────────────────────────
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
@@ -74,6 +81,10 @@ app.get('/', (req, res) => {
     key_set: !!ANTHROPIC_KEY
   });
 });
+ 
+// GET handlers so browser URL tests work
+app.get('/api/ask-apollo',   (req, res) => res.json({ status: 'ok', method: 'POST required' }));
+app.get('/api/generate-picks',(req, res) => res.json({ status: 'ok', method: 'POST required' }));
  
 // ── POST /api/ask-apollo ──────────────────────────────────────────────────
 // Used by machine.html for: pick analysis, parlay analysis, Ask Apollo chat
@@ -281,3 +292,4 @@ app.listen(PORT, () => {
   console.log(`API key set: ${!!ANTHROPIC_KEY}`);
   console.log('CORS: open to all origins');
 });
+ 
