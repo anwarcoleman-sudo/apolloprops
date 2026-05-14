@@ -24,17 +24,21 @@ app.use(express.json());
 // ── CORS ──────────────────────────────────────────────────────────────────
 // Allow your HostGator domain to call this API
 // Add localhost:3000 for local testing
-// Explicit CORS headers — handles browser preflight OPTIONS requests
+// CORS — must be first middleware, handles browser preflight
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+  res.header('Access-Control-Max-Age', '86400');
+  res.sendStatus(200);
+});
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
   next();
 });
-app.use(cors({ origin: '*' }));
+app.use(cors({ origin: '*', optionsSuccessStatus: 200 }));
  
 // ── ANTHROPIC HELPER ──────────────────────────────────────────────────────
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
@@ -44,6 +48,7 @@ async function callClaude(body) {
   if (!ANTHROPIC_KEY) {
     throw new Error('ANTHROPIC_API_KEY not set in environment variables');
   }
+  console.log('Calling Anthropic, model:', MODEL, 'max_tokens:', body.max_tokens);
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method:  'POST',
     headers: {
@@ -53,9 +58,11 @@ async function callClaude(body) {
     },
     body: JSON.stringify({ model: MODEL, ...body })
   });
+  console.log('Anthropic response status:', response.status);
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`Anthropic API error ${response.status}: ${err}`);
+    console.error('Anthropic error body:', err);
+    throw new Error('Anthropic API error ' + response.status + ': ' + err);
   }
   return response.json();
 }
@@ -92,15 +99,18 @@ app.get('/api/generate-picks',(req, res) => res.json({ status: 'ok', method: 'PO
 app.post('/api/ask-apollo', async (req, res) => {
   try {
     const { system, messages, max_tokens } = req.body;
+    if (!messages || !messages.length) {
+      return res.status(400).json({ error: 'messages array required' });
+    }
     const data = await callClaude({
       max_tokens: max_tokens || 1000,
-      system:     system,
+      system:     system || 'You are Apollo, a sharp sports analyst.',
       messages:   messages
     });
     res.json(data);
   } catch(e) {
     console.error('/api/ask-apollo error:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: e.message, hint: 'Check Railway logs for details' });
   }
 });
  
@@ -185,11 +195,15 @@ Use ONLY players from teams playing tonight.`;
       system:     systemPrompt,
       messages:   [{ role: 'user', content: `Generate ${pickCount}. ${instructions}` }]
     });
-    const result = parseJSON(getText(data), { picks: [] });
+    const rawText = getText(data);
+    console.log('Raw Anthropic response (first 500):', rawText.slice(0, 500));
+    const result = parseJSON(rawText, { picks: [] });
+    console.log('Parsed picks count:', (result.picks||[]).length);
     // Validate picks have required fields
     const valid = (result.picks || []).filter(p =>
       p.player && p.sport && p.propType && p.line !== undefined && p.direction
     );
+    console.log('Valid picks after filter:', valid.length);
     res.json({ picks: valid });
   } catch(e) {
     console.error('/api/generate-picks error:', e.message);
@@ -287,9 +301,9 @@ Return JSON only: {"results":[{"id":"...","result":"win|loss|pending|unknown","a
  
 // ── START SERVER ──────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`ApolloProps API running on port ${PORT}`);
   console.log(`API key set: ${!!ANTHROPIC_KEY}`);
   console.log('CORS: open to all origins');
+  console.log('Listening on 0.0.0.0 for Railway routing');
 });
- 
