@@ -449,34 +449,33 @@ app.post('/api/generate-picks', async (req, res) => {
  
   const system =
     'You are ApolloProps, a sports betting data engine. '
-    + 'You will receive a verified live slate with real sportsbook odds including player props. '
-    + '\n\nCRITICAL RULES FOR THE player FIELD:\n'
-    + '- For player prop picks (pts, reb, ast, hits, hr, tb, str, etc): '
-    +   'player = the REAL FULL NAME of the player e.g. "LeBron James", "Shohei Ohtani", "Caitlin Clark". '
-    +   'Use the exact player names shown in the PROPS section of the slate. '
-    +   'NEVER put a team name or abbreviation in the player field for a prop pick.\n'
-    + '- For team picks (ml, spread, total): '
-    +   'player = the full team name e.g. "Los Angeles Lakers", "New York Yankees".\n'
-    + '\nOTHER RULES:\n'
-    + '- Only generate picks from games in the slate. '
-    + '- Do NOT refuse or ask for more data. '
-    + '- Use real lines and odds from the slate. '
-    + '- Return ONLY valid JSON, no markdown:\n'
+    + 'You will receive a verified live slate with real sportsbook odds. '
+    + 'Some games include PROPS (player lines). Others have only team markets (ML/spread/total). '
+    + '\n\nRULES — READ CAREFULLY:\n'
+    + '1. ONLY use player names explicitly listed in the PROPS section of the slate. '
+    +    'If a game has no PROPS section, do NOT generate player prop picks for that game. '
+    +    'Generate team picks (ML/spread/total) instead using the team markets shown.\n'
+    + '2. NEVER invent player names. NEVER use "player not listed", "unknown", or placeholder names.\n'
+    + '3. For PROP picks: player field = exact player name from PROPS e.g. "Luka Doncic", "Caitlin Clark".\n'
+    + '4. For TEAM picks (ml/spread/total): player field = full team name e.g. "Dallas Mavericks".\n'
+    + '5. Only use games, teams, and players shown in the slate. No invented matchups.\n'
+    + '6. Return ONLY valid JSON, no markdown, no explanation:\n'
     + PICK_SCHEMA;
  
   const sportInstr = {
-    nba:  '8 NBA picks: 5 player props (pts/reb/ast, use props data) + 2 team picks + 1 spread',
-    mlb:  '12 MLB picks: 4 pitcher strikeout props + 4 batter props + 2 moneylines + 2 totals',
-    nhl:  '8 NHL picks: 5 player props + 2 puck lines + 1 total',
-    wnba: '8 WNBA picks: 5 player props (pts/reb/ast/threes, use props if available) + 2 team ML picks + 1 total. If player props are not in the slate, generate team picks only and note props not yet posted.',
-    all:  '16 total picks spread across the sports shown — NBA, WNBA, MLB, NHL'
-  }[sport] || '14 picks from the slate';
+    nba:  'Generate up to 8 NBA picks. For each game: if PROPS are listed use player prop picks (pts/reb/ast). If NO PROPS listed for a game, generate team ML/spread/total picks only. Never invent player names.',
+    mlb:  'Generate up to 12 MLB picks. For each game: if PROPS are listed use player props (pitcher Ks, batter hits/TB/HR). If NO PROPS, generate team ML and game total picks only. Never invent player names.',
+    nhl:  'Generate up to 8 NHL picks using team ML, puck line, and totals from the slate. Only add player props if PROPS are listed.',
+    wnba: 'Generate up to 8 WNBA picks. If PROPS are listed use player names shown. If NO PROPS listed, generate team ML/spread/total picks only using the team names shown. Never invent player names.',
+    all:  'Generate up to 16 picks across all sports in the slate. For each game use PROPS section for player picks if available. If no PROPS for a game, use team ML/spread/total only. Never invent player names.'
+  }[sport] || 'Generate picks from the slate. Use player names from PROPS sections only. For games without PROPS use team picks.';
  
   const userMsg = 'Here is today\'s verified live slate with real sportsbook odds:\n\n'
     + slatePrompt
     + '\nGenerate ' + sportInstr + '. '
-    + 'IMPORTANT: For every player prop pick, use the exact player name from the PROPS section. '
-    + 'Do not use team names for prop picks. Return JSON only.';
+    + 'IMPORTANT: Only use player names explicitly shown in PROPS sections. '
+    + 'If a game has no PROPS section, generate team ML/spread/total picks for it instead. '
+    + 'Never write player not listed or invent names. Return JSON only.';
  
   console.log('[claude] sending slate:', relevantGames.length, 'games to analyze');
  
@@ -486,10 +485,26 @@ app.post('/api/generate-picks', async (req, res) => {
     console.log('[claude] response length:', raw.length, '| first 300:', raw.slice(0, 300));
  
     const result = parseJSON(raw, { picks: [] });
-    const valid  = (result.picks || []).filter(p =>
-      p.player && p.sport && p.propType && p.line != null && p.direction
-    );
-    console.log('[picks] valid:', valid.length);
+    // Filter out bad picks — no invented players, no placeholder names
+    const BAD_NAMES = ['player not listed','unknown','n/a','tbd','player','undefined',
+                       'null','not listed','unlisted','unnamed'];
+    const valid  = (result.picks || []).filter(p => {
+      if (!p.player || !p.sport || !p.propType || p.line == null || !p.direction) return false;
+      const nameLower = p.player.toLowerCase().trim();
+      // Reject placeholder names
+      if (BAD_NAMES.some(bad => nameLower.includes(bad))) {
+        console.log('[picks] rejected bad player name:', p.player);
+        return false;
+      }
+      // Reject if player name looks like a team abbreviation for a prop pick
+      const isProp = !['ml','spread','total','h2h','spreads','totals'].includes(p.propType);
+      if (isProp && p.player.length <= 3) {
+        console.log('[picks] rejected abbreviation as player name:', p.player);
+        return false;
+      }
+      return true;
+    });
+    console.log('[picks] valid after filter:', valid.length);
  
     // Cache picks
     if (!picksCache.date) picksCache.picks = {};
