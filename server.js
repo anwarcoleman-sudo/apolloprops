@@ -406,4 +406,3 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('CORS: open to all origins');
   console.log('Listening on 0.0.0.0 for Railway routing');
 });
- 
