@@ -1,6 +1,3 @@
-
-Copy
-
 /*
  * ApolloProps API Server
  * ======================
