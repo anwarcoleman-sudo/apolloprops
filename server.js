@@ -1,11 +1,13 @@
 /*
- * ApolloProps API Server — Live Data Build
- * =========================================
- * Data flow:
- *   1. Odds API  → fetches today's real games, lines, props
- *   2. Cache     → stores slate for the day (one API call per day)
- *   3. Claude    → analyzes verified slate, returns picks
- *   4. Frontend  → displays picks with timestamps
+ * ApolloProps API Server
+ * ======================
+ * Architecture:
+ *   1. Odds API  → fetches today's real games + lines (cached 5 min)
+ *   2. Claude    → receives structured slate, returns picks JSON
+ *   3. Frontend  → displays picks with timestamp
+ *
+ * If Odds API fails  → show "Live odds temporarily unavailable"
+ * Claude NEVER sees a blank slate → NEVER refuses
  *
  * Railway env vars:
  *   ANTHROPIC_API_KEY = sk-ant-...
@@ -32,48 +34,237 @@ app.use((req, res, next) => {
 });
 app.use(cors({ origin: '*', optionsSuccessStatus: 200 }));
  
-// ── KEYS ──────────────────────────────────────────────────────────────────
+// ── CONFIG ─────────────────────────────────────────────────────────────────
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const ODDS_KEY      = process.env.ODDS_API_KEY;
 const MODEL         = 'claude-sonnet-4-20250514';
+const ODDS_BASE     = 'https://api.the-odds-api.com/v4';
  
-// ── HELPERS ───────────────────────────────────────────────────────────────
-function getTodayET() {
+// ── TIME HELPERS ──────────────────────────────────────────────────────────
+function nowET() {
+  return new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+}
+function todayET() {
   return new Date().toLocaleDateString('en-US', {
     timeZone: 'America/New_York',
     weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
   });
 }
-function getNowET() {
-  return new Date().toLocaleTimeString('en-US', {
-    timeZone: 'America/New_York',
-    hour: 'numeric', minute: '2-digit', hour12: true
-  });
-}
-function isoToET(iso) {
+function timeET(iso) {
   return new Date(iso).toLocaleTimeString('en-US', {
     timeZone: 'America/New_York',
     hour: 'numeric', minute: '2-digit', hour12: true
   }) + ' ET';
 }
-function getText(data) {
-  return data.content?.map(c => c.text || '').join('') || '';
+function isToday(iso) {
+  const gameDate = new Date(iso).toLocaleDateString('en-US', { timeZone: 'America/New_York' });
+  const today    = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' });
+  return gameDate === today;
 }
+ 
+// ── CACHE ─────────────────────────────────────────────────────────────────
+// Slate cache: 5 minutes (reduces Odds API credit usage)
+// Picks cache: rest of day (reset at midnight ET)
+const slateCache = { data: null, sport: null, ts: 0 };          // 5-min TTL
+const picksCache = { picks: {}, date: null };                    // daily TTL
+const potdCache  = { pick: null, date: null };
+ 
+const SLATE_TTL = 5 * 60 * 1000; // 5 minutes
+ 
+function slateIsValid(sport) {
+  return slateCache.data &&
+         slateCache.sport === sport &&
+         (Date.now() - slateCache.ts) < SLATE_TTL;
+}
+function picksAreValid(sport) {
+  return picksCache.date === todayET() && picksCache.picks[sport]?.length;
+}
+function potdIsValid() {
+  return potdCache.date === todayET() && potdCache.pick;
+}
+ 
+// Reset picks at midnight ET
+function clearAtMidnight() {
+  const etNow  = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etNext = new Date(etNow); etNext.setHours(24, 0, 0, 0);
+  const ms     = etNext - etNow;
+  setTimeout(() => {
+    picksCache.picks = {}; picksCache.date = null;
+    potdCache.pick   = null; potdCache.date  = null;
+    console.log('[cache] Picks cache cleared at midnight ET');
+    clearAtMidnight();
+  }, ms);
+  console.log('[cache] Next clear in', Math.round(ms / 60000), 'minutes');
+}
+clearAtMidnight();
+ 
+// ── ODDS API ──────────────────────────────────────────────────────────────
+async function oddsGet(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  const url = ODDS_BASE + path + sep + 'apiKey=' + ODDS_KEY;
+  const r   = await fetch(url);
+  const rem = r.headers.get('x-requests-remaining');
+  console.log('[odds] GET', path.split('?')[0], '→', r.status, rem ? '| remaining: ' + rem : '');
+  if (!r.ok) throw new Error('Odds API ' + r.status + ': ' + await r.text());
+  return r.json();
+}
+ 
+// Fetch today's games + main markets for one sport key
+async function fetchGames(sportKey) {
+  const games = await oddsGet(
+    '/sports/' + sportKey + '/odds/'
+    + '?regions=us&markets=h2h,spreads,totals&oddsFormat=american&dateFormat=iso'
+  );
+  const todayGames = (games || []).filter(g => isToday(g.commence_time));
+  console.log('[odds]', sportKey, '→', games.length, 'total,', todayGames.length, 'today');
+  return todayGames;
+}
+ 
+// Fetch player props for one event (NBA + MLB top games only)
+async function fetchProps(sportKey, eventId, eventLabel) {
+  const markets = sportKey === 'basketball_nba'
+    ? 'player_points,player_rebounds,player_assists'
+    : 'batter_hits,batter_total_bases,pitcher_strikeouts,batter_home_runs';
+  try {
+    const data = await oddsGet(
+      '/sports/' + sportKey + '/events/' + eventId + '/odds'
+      + '?regions=us&markets=' + markets + '&oddsFormat=american&dateFormat=iso'
+    );
+    const bk     = data?.bookmakers?.[0];
+    const props  = [];
+    bk?.markets?.forEach(mkt => {
+      mkt.outcomes?.forEach(o => {
+        if (o.point != null) {
+          props.push({
+            player:    o.name,
+            market:    mkt.key.replace('player_','').replace('batter_','').replace('pitcher_',''),
+            line:      o.point,
+            direction: mkt.outcomes.indexOf(o) % 2 === 0 ? 'over' : 'under',
+            price:     o.price
+          });
+        }
+      });
+    });
+    console.log('[odds] props', eventLabel, '→', props.length, 'lines');
+    return props;
+  } catch(e) {
+    console.warn('[odds] props fetch skipped for', eventLabel, ':', e.message);
+    return [];
+  }
+}
+ 
+// Build full structured slate for one or all sports
+async function buildSlate(sportFilter) {
+  const sportMap = { nba: 'basketball_nba', mlb: 'baseball_mlb', nhl: 'icehockey_nhl' };
+  const sports   = sportFilter === 'all'
+    ? Object.entries(sportMap)
+    : [[sportFilter, sportMap[sportFilter]]].filter(([,v]) => v);
+ 
+  const result = { date: todayET(), updatedAt: nowET(), games: [] };
+ 
+  for (const [sport, key] of sports) {
+    const games = await fetchGames(key);
+    let propsCount = 0;
+ 
+    for (const g of games) {
+      const gameObj = {
+        id:      g.id,
+        sport,
+        away:    g.away_team,
+        home:    g.home_team,
+        time:    timeET(g.commence_time),
+        markets: {}
+      };
+ 
+      // Extract best odds from first bookmaker
+      const bk = g.bookmakers?.[0];
+      if (bk) {
+        gameObj.sportsbook = bk.title;
+        bk.markets?.forEach(mkt => {
+          gameObj.markets[mkt.key] = mkt.outcomes.map(o => ({
+            name:  o.name,
+            price: o.price,
+            point: o.point
+          }));
+        });
+      }
+ 
+      // Fetch player props for first 3 games per sport
+      if (propsCount < 3 && (sport === 'nba' || sport === 'mlb')) {
+        gameObj.props = await fetchProps(key, g.id, g.away_team + ' @ ' + g.home_team);
+        propsCount++;
+      } else {
+        gameObj.props = [];
+      }
+ 
+      result.games.push(gameObj);
+    }
+  }
+ 
+  console.log('[slate] Built:', result.games.length, 'total games');
+  return result;
+}
+ 
+// Format slate as structured text for Claude prompt
+function slateToPrompt(slate, sport) {
+  const games = slate.games.filter(g => sport === 'all' || g.sport === sport);
+  if (!games.length) return null;
+ 
+  let out = 'VERIFIED LIVE SLATE — ' + slate.date + ' (updated ' + slate.updatedAt + ')\n';
+  out    += 'Source: The Odds API | Timezone: America/New_York\n\n';
+ 
+  const bySport = {};
+  games.forEach(g => { (bySport[g.sport] = bySport[g.sport] || []).push(g); });
+ 
+  Object.entries(bySport).forEach(([sp, gs]) => {
+    out += '═══ ' + sp.toUpperCase() + ' ═══\n';
+    gs.forEach(g => {
+      out += g.away + ' @ ' + g.home + '  ' + g.time;
+      if (g.sportsbook) out += '  [' + g.sportsbook + ']';
+      out += '\n';
+ 
+      const ml = g.markets.h2h;
+      if (ml) out += '  ML:     ' + ml.map(o => o.name + ' ' + (o.price > 0 ? '+' : '') + o.price).join(' | ') + '\n';
+ 
+      const sp2 = g.markets.spreads;
+      if (sp2) out += '  Spread: ' + sp2.map(o => o.name + ' ' + o.point + ' (' + (o.price > 0 ? '+' : '') + o.price + ')').join(' | ') + '\n';
+ 
+      const tot = g.markets.totals;
+      if (tot) out += '  Total:  O/U ' + tot[0]?.point + '\n';
+ 
+      if (g.props.length) {
+        out += '  PROPS:\n';
+        // Group by player
+        const byPlayer = {};
+        g.props.forEach(p => { (byPlayer[p.player] = byPlayer[p.player] || []).push(p); });
+        Object.entries(byPlayer).slice(0, 6).forEach(([player, lines]) => {
+          lines.forEach(l => {
+            out += '    ' + player + ' ' + l.market.toUpperCase()
+              + ' ' + (l.direction === 'over' ? 'O' : 'U') + l.line
+              + ' (' + (l.price > 0 ? '+' : '') + l.price + ')\n';
+          });
+        });
+      }
+      out += '\n';
+    });
+  });
+ 
+  return out;
+}
+ 
+// ── ANTHROPIC ─────────────────────────────────────────────────────────────
 function parseJSON(text, fallback) {
   try {
-    const clean = text.replace(/```json|```/g, '').trim();
-    const start = clean.indexOf('{');
-    const end   = clean.lastIndexOf('}');
-    if (start === -1 || end === -1) throw new Error('no JSON object found');
-    return JSON.parse(clean.slice(start, end + 1));
-  } catch(e) {
-    console.error('JSON parse error:', e.message);
-    console.error('Text was:', text.slice(0, 400));
+    const s = text.indexOf('{'), e = text.lastIndexOf('}');
+    if (s === -1 || e === -1) throw new Error('no JSON');
+    return JSON.parse(text.slice(s, e + 1));
+  } catch(err) {
+    console.error('[claude] JSON parse failed:', err.message);
+    console.error('[claude] raw (first 400):', text.slice(0, 400));
     return fallback;
   }
 }
  
-// ── ANTHROPIC ─────────────────────────────────────────────────────────────
 async function callClaude(body) {
   if (!ANTHROPIC_KEY) throw new Error('ANTHROPIC_API_KEY not set');
   const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -85,505 +276,266 @@ async function callClaude(body) {
     },
     body: JSON.stringify({ model: MODEL, ...body })
   });
-  if (!r.ok) {
-    const err = await r.text();
-    throw new Error('Anthropic ' + r.status + ': ' + err);
-  }
+  if (!r.ok) throw new Error('Anthropic ' + r.status + ': ' + await r.text());
   return r.json();
 }
  
-// ── CACHE ─────────────────────────────────────────────────────────────────
-const cache = {
-  slateDate:   null,   // date the slate was fetched
-  slate:       null,   // raw game + odds data from Odds API
-  slateTime:   null,   // timestamp of last fetch
-  picks:       {},     // { all, nba, mlb, nhl }
-  picksDate:   null,
-  potd:        null,
-  potdDate:    null
-};
+function getText(d) { return d.content?.map(c => c.text || '').join('') || ''; }
  
-function isSlateValid()  { return cache.slateDate  === getTodayET() && cache.slate; }
-function isPicksValid(s) { return cache.picksDate  === getTodayET() && cache.picks[s]?.length; }
-function isPotdValid()   { return cache.potdDate   === getTodayET() && cache.potd; }
+// ── PICK SCHEMA ───────────────────────────────────────────────────────────
+const PICK_SCHEMA = '{"picks":['
+  + '{"id":"p1",'
+  + '"player":"Full Name or Team Name",'
+  + '"team":"ABBR","opp":"ABBR",'
+  + '"sport":"nba|mlb|nhl",'
+  + '"time":"7:00 PM ET",'
+  + '"propType":"pts|reb|ast|hits|tb|hr|rbi|str|ml|spread|total",'
+  + '"propLabel":"Points",'
+  + '"line":27.5,'
+  + '"direction":"over|under",'
+  + '"last5":[true,false,true,true,false],'
+  + '"confidence":78,'
+  + '"reason":"Max 15 words using the actual odds shown",'
+  + '"recentScores":["23","28","31"],'
+  + '"gameKey":"CLE-DET",'
+  + '"gameLabel":"CLE vs DET",'
+  + '"odds":"-115"}'
+  + ']}';
  
-function clearAtMidnight() {
-  const now   = new Date();
-  const etNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const next  = new Date(etNow); next.setHours(24, 0, 0, 0);
-  const ms    = next - etNow;
-  setTimeout(() => {
-    Object.assign(cache, { slateDate:null, slate:null, slateTime:null,
-                            picks:{}, picksDate:null, potd:null, potdDate:null });
-    console.log('Cache cleared at midnight ET');
-    clearAtMidnight();
-  }, ms);
-  console.log('Cache clears in ' + Math.round(ms/60000) + ' min');
-}
-clearAtMidnight();
- 
-// ── ODDS API ──────────────────────────────────────────────────────────────
-const ODDS_BASE = 'https://api.the-odds-api.com/v4';
-const SPORT_KEYS = {
-  nba: 'basketball_nba',
-  mlb: 'baseball_mlb',
-  nhl: 'icehockey_nhl'
-};
- 
-async function oddsGet(path) {
-  const sep = path.includes('?') ? '&' : '?';
-  const url = ODDS_BASE + path + sep + 'apiKey=' + ODDS_KEY;
-  const r   = await fetch(url);
-  console.log('Odds API:', url.replace(ODDS_KEY, 'KEY'), '→', r.status);
-  if (!r.ok) throw new Error('Odds API ' + r.status);
-  const remaining = r.headers.get('x-requests-remaining');
-  if (remaining) console.log('Odds API requests remaining:', remaining);
-  return r.json();
-}
- 
-// Fetch today's games + main markets for one sport
-async function fetchSportSlate(sportKey) {
-  try {
-    const games = await oddsGet(
-      '/sports/' + sportKey + '/odds/'
-      + '?regions=us&markets=h2h,spreads,totals&oddsFormat=american&dateFormat=iso'
-    );
-    // Filter to games starting within 24 hours
-    const now       = Date.now();
-    const in24Hours = now + 24 * 60 * 60 * 1000;
-    return (games || []).filter(g => {
-      const t = new Date(g.commence_time).getTime();
-      return t >= now - 3600000 && t <= in24Hours; // started up to 1hr ago or upcoming
-    });
-  } catch(e) {
-    console.error('fetchSportSlate error for', sportKey, ':', e.message);
-    return [];
-  }
-}
- 
-// Fetch player props for a specific event (uses separate endpoint)
-async function fetchEventProps(sportKey, eventId) {
-  try {
-    const propMarkets = sportKey === 'basketball_nba'
-      ? 'player_points,player_rebounds,player_assists,player_threes'
-      : 'batter_hits,batter_total_bases,batter_home_runs,pitcher_strikeouts';
- 
-    const data = await oddsGet(
-      '/sports/' + sportKey + '/events/' + eventId + '/odds'
-      + '?regions=us&markets=' + propMarkets + '&oddsFormat=american&dateFormat=iso'
-    );
-    return data;
-  } catch(e) {
-    console.error('fetchEventProps error:', e.message);
-    return null;
-  }
-}
- 
-// Build the full slate — games + odds + props
-async function buildSlate(sportFilter) {
-  if (!ODDS_KEY) {
-    console.log('No ODDS_API_KEY — cannot fetch live slate');
-    return null;
-  }
- 
-  const sports = sportFilter === 'all'
-    ? ['nba','mlb','nhl']
-    : [sportFilter].filter(s => SPORT_KEYS[s]);
- 
-  const slate = { date: getTodayET(), updatedAt: getNowET(), games: [] };
- 
-  for (const sport of sports) {
-    const games = await fetchSportSlate(SPORT_KEYS[sport]);
-    console.log('Slate:', games.length, sport.toUpperCase(), 'games today');
- 
-    for (const g of games) {
-      const gameObj = {
-        id:        g.id,
-        sport:     sport,
-        home:      g.home_team,
-        away:      g.away_team,
-        time:      isoToET(g.commence_time),
-        isoTime:   g.commence_time,
-        bookmakers: [],
-        props:     []
-      };
- 
-      // Main markets from first 2 bookmakers
-      const bks = (g.bookmakers || []).slice(0, 2);
-      bks.forEach(bk => {
-        const entry = { name: bk.title, markets: {} };
-        bk.markets?.forEach(mkt => {
-          entry.markets[mkt.key] = mkt.outcomes;
-        });
-        gameObj.bookmakers.push(entry);
-      });
- 
-      // Fetch player props for NBA + MLB games (uses API credits — limit to top 4 games)
-      if ((sport === 'nba' || sport === 'mlb') && slate.games.filter(x=>x.sport===sport).length < 4) {
-        const props = await fetchEventProps(SPORT_KEYS[sport], g.id);
-        if (props?.bookmakers?.length) {
-          const propBk = props.bookmakers[0];
-          propBk.markets?.forEach(mkt => {
-            mkt.outcomes?.forEach(o => {
-              gameObj.props.push({
-                player:    o.name,
-                market:    mkt.key,
-                line:      o.point,
-                direction: o.name.toLowerCase().includes('over') ? 'over' : 'under',
-                price:     o.price
-              });
-            });
-          });
-          console.log('Props loaded for', g.away_team, '@', g.home_team, ':', gameObj.props.length, 'lines');
-        }
-      }
- 
-      slate.games.push(gameObj);
-    }
-  }
- 
-  return slate;
-}
- 
-// Format slate into a readable string for Claude
-function formatSlateForClaude(slate) {
-  if (!slate || !slate.games.length) return 'No games available today.';
- 
-  let out = 'TODAY\'S VERIFIED GAME SLATE (' + slate.date + ', updated ' + slate.updatedAt + '):\n\n';
- 
-  const bySport = {};
-  slate.games.forEach(g => {
-    if (!bySport[g.sport]) bySport[g.sport] = [];
-    bySport[g.sport].push(g);
-  });
- 
-  Object.entries(bySport).forEach(([sport, games]) => {
-    out += sport.toUpperCase() + ' GAMES:\n';
-    games.forEach(g => {
-      out += g.away + ' @ ' + g.home + '  ' + g.time + '\n';
- 
-      // Main market odds
-      const bk = g.bookmakers[0];
-      if (bk) {
-        const ml = bk.markets?.h2h;
-        if (ml) {
-          const lines = ml.map(o => o.name + ' ' + (o.price > 0 ? '+' : '') + o.price).join(' | ');
-          out += '  ML: ' + lines + '\n';
-        }
-        const sp = bk.markets?.spreads;
-        if (sp) {
-          const lines = sp.map(o => o.name + ' ' + o.point + ' (' + (o.price > 0 ? '+' : '') + o.price + ')').join(' | ');
-          out += '  Spread: ' + lines + '\n';
-        }
-        const tot = bk.markets?.totals;
-        if (tot) {
-          out += '  Total: ' + tot[0]?.point + '\n';
-        }
-      }
- 
-      // Player props
-      if (g.props.length) {
-        out += '  PLAYER PROPS:\n';
-        const grouped = {};
-        g.props.forEach(p => {
-          if (!grouped[p.player]) grouped[p.player] = [];
-          grouped[p.player].push(p);
-        });
-        Object.entries(grouped).slice(0, 8).forEach(([player, lines]) => {
-          lines.slice(0, 2).forEach(l => {
-            out += '    ' + player + ' ' + l.market.replace('player_','').replace('batter_','').replace('pitcher_','') +
-              ' ' + (l.direction === 'over' ? 'O' : 'U') + l.line +
-              ' (' + (l.price > 0 ? '+' : '') + l.price + ')\n';
-          });
-        });
-      }
-      out += '\n';
-    });
-  });
- 
-  return out;
-}
- 
-// ── HEALTH CHECK ──────────────────────────────────────────────────────────
+// ── HEALTH ────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
-    status:          'ApolloProps API is running',
-    time:            new Date().toISOString(),
-    today_et:        getTodayET(),
+    status:          'ApolloProps API running',
+    time_et:         nowET(),
+    today_et:        todayET(),
     anthropic_ready: !!ANTHROPIC_KEY,
     odds_api_ready:  !!ODDS_KEY,
-    slate_valid:     isSlateValid(),
-    slate_games:     cache.slate?.games?.length || 0,
-    slate_updated:   cache.slateTime || 'not yet',
-    picks_cached:    Object.fromEntries(Object.entries(cache.picks).map(([k,v])=>[k,v?.length||0]))
+    slate_cached:    slateIsValid('all'),
+    slate_games:     slateCache.data?.games?.length || 0,
+    slate_age_sec:   slateCache.ts ? Math.round((Date.now() - slateCache.ts) / 1000) : null,
+    picks_cached:    Object.fromEntries(Object.entries(picksCache.picks).map(([k,v])=>[k,v?.length||0]))
   });
 });
  
 // ── GET /api/slate/today ──────────────────────────────────────────────────
-// Returns today's verified game slate with odds
 app.get('/api/slate/today', async (req, res) => {
-  // Serve from cache if valid
-  if (isSlateValid()) {
-    console.log('Serving cached slate');
-    return res.json({ slate: cache.slate, cached: true });
+  const sport = req.query.sport || 'all';
+  if (slateIsValid(sport)) {
+    return res.json({ slate: slateCache.data, cached: true, ageSeconds: Math.round((Date.now()-slateCache.ts)/1000) });
   }
- 
-  if (!ODDS_KEY) {
-    return res.json({
-      slate: null,
-      error: 'ODDS_API_KEY not configured',
-      message: 'Add ODDS_API_KEY to Railway environment variables'
-    });
-  }
- 
+  if (!ODDS_KEY) return res.json({ slate: null, error: 'ODDS_API_KEY not set in Railway Variables' });
   try {
-    const slate = await buildSlate('all');
-    if (slate && slate.games.length) {
-      cache.slate     = slate;
-      cache.slateDate = getTodayET();
-      cache.slateTime = getNowET();
-      console.log('Slate cached:', slate.games.length, 'games');
-      res.json({ slate, cached: false });
-    } else {
-      res.json({ slate: null, message: 'No games found for today' });
-    }
+    const slate = await buildSlate(sport);
+    slateCache.data = slate; slateCache.sport = sport; slateCache.ts = Date.now();
+    res.json({ slate, cached: false });
   } catch(e) {
-    console.error('/api/slate/today error:', e.message);
+    console.error('[slate] fetch error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
  
-app.get('/api/slate',       (req, res) => res.redirect('/api/slate/today'));
-app.get('/api/schedule',    async (req, res) => {
-  if (isSlateValid()) {
-    const nba = cache.slate.games.filter(g=>g.sport==='nba');
-    const mlb = cache.slate.games.filter(g=>g.sport==='mlb');
-    const nhl = cache.slate.games.filter(g=>g.sport==='nhl');
-    return res.json({
-      date:     cache.slate.date,
-      nba:      nba.map(g => g.away + ' @ ' + g.home + ' ' + g.time),
-      mlb:      mlb.map(g => g.away + ' @ ' + g.home + ' ' + g.time),
-      nhl:      nhl.map(g => g.away + ' @ ' + g.home + ' ' + g.time),
-      nbaCount: nba.length,
-      mlbCount: mlb.length,
-      nhlCount: nhl.length,
-      updatedAt: cache.slateTime
-    });
+// ── GET /api/schedule ─────────────────────────────────────────────────────
+app.get('/api/schedule', async (req, res) => {
+  let slate = slateIsValid('all') ? slateCache.data : null;
+  if (!slate && ODDS_KEY) {
+    try {
+      slate = await buildSlate('all');
+      slateCache.data = slate; slateCache.sport = 'all'; slateCache.ts = Date.now();
+    } catch(e) { console.error('[schedule]', e.message); }
   }
-  // No slate yet — fetch it
-  try {
-    const slate = await buildSlate('all');
-    if (slate?.games?.length) {
-      cache.slate = slate; cache.slateDate = getTodayET(); cache.slateTime = getNowET();
-    }
-    const nba = (slate?.games||[]).filter(g=>g.sport==='nba');
-    const mlb = (slate?.games||[]).filter(g=>g.sport==='mlb');
-    const nhl = (slate?.games||[]).filter(g=>g.sport==='nhl');
-    res.json({
-      date:     getTodayET(),
-      nba:      nba.map(g => g.away + ' @ ' + g.home + ' ' + g.time),
-      mlb:      mlb.map(g => g.away + ' @ ' + g.home + ' ' + g.time),
-      nhl:      nhl.map(g => g.away + ' @ ' + g.home + ' ' + g.time),
-      nbaCount: nba.length, mlbCount: mlb.length, nhlCount: nhl.length,
-      updatedAt: getNowET()
-    });
-  } catch(e) {
-    res.json({ date: getTodayET(), nba:[], mlb:[], nhl:[], nbaCount:0, mlbCount:0, nhlCount:0 });
-  }
+  const nba = (slate?.games||[]).filter(g=>g.sport==='nba');
+  const mlb = (slate?.games||[]).filter(g=>g.sport==='mlb');
+  const nhl = (slate?.games||[]).filter(g=>g.sport==='nhl');
+  res.json({
+    date:      todayET(),
+    updatedAt: slate?.updatedAt || null,
+    nba:       nba.map(g => g.away+' @ '+g.home+' '+g.time),
+    mlb:       mlb.map(g => g.away+' @ '+g.home+' '+g.time),
+    nhl:       nhl.map(g => g.away+' @ '+g.home+' '+g.time),
+    nbaCount:  nba.length,
+    mlbCount:  mlb.length,
+    nhlCount:  nhl.length
+  });
 });
  
-// ── GET /api/ask-apollo ───────────────────────────────────────────────────
-app.get('/api/ask-apollo',    (req, res) => res.json({ status: 'ok', method: 'POST required' }));
-app.get('/api/generate-picks',(req, res) => res.json({ status: 'ok', method: 'POST required' }));
- 
-// ── POST /api/ask-apollo ──────────────────────────────────────────────────
+// ── GET/POST /api/ask-apollo ──────────────────────────────────────────────
+app.get('/api/ask-apollo', (req, res) => res.json({ status: 'ok', method: 'POST required' }));
 app.post('/api/ask-apollo', async (req, res) => {
   try {
     const { system, messages, max_tokens } = req.body;
     if (!messages?.length) return res.status(400).json({ error: 'messages required' });
-    const data = await callClaude({
-      max_tokens: max_tokens || 1000,
-      system: system || 'You are Apollo, a sharp sports betting analyst.',
-      messages
-    });
+    const data = await callClaude({ max_tokens: max_tokens||1000, system, messages });
     res.json(data);
   } catch(e) {
-    console.error('/api/ask-apollo error:', e.message);
+    console.error('[ask-apollo]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
  
-// ── POST /api/generate-picks ──────────────────────────────────────────────
+// ── GET/POST /api/generate-picks ──────────────────────────────────────────
+app.get('/api/generate-picks', (req, res) => res.json({ status: 'ok', method: 'POST required' }));
+ 
 app.post('/api/generate-picks', async (req, res) => {
   const sport   = req.body.sport || 'all';
-  const todayET = getTodayET();
+  const dateStr = todayET();
  
-  // Serve from picks cache
-  if (isPicksValid(sport)) {
-    console.log('Serving cached picks for', sport, '—', cache.picks[sport].length, 'picks');
-    return res.json({ picks: cache.picks[sport], date: todayET, cached: true, slateTime: cache.slateTime });
+  // ── Serve from picks cache ────────────────────────────────────────────
+  if (picksAreValid(sport)) {
+    console.log('[picks] serving cache:', sport, picksCache.picks[sport].length, 'picks');
+    return res.json({ picks: picksCache.picks[sport], date: dateStr, cached: true, slateTime: slateCache.data?.updatedAt });
   }
-  if (isPicksValid('all') && sport !== 'all') {
-    const filtered = cache.picks.all.filter(p => p.sport === sport);
-    if (filtered.length) return res.json({ picks: filtered, date: todayET, cached: true, slateTime: cache.slateTime });
+  if (picksAreValid('all') && sport !== 'all') {
+    const f = picksCache.picks.all.filter(p => p.sport === sport);
+    if (f.length) return res.json({ picks: f, date: dateStr, cached: true });
   }
  
-  // STEP 1 — Get today's slate (from cache or fresh fetch)
-  let slate = isSlateValid() ? cache.slate : null;
+  // ── STEP 1: Fetch live slate ──────────────────────────────────────────
+  console.log('[picks] generating fresh picks — sport:', sport);
+ 
+  if (!ODDS_KEY) {
+    console.error('[picks] ODDS_API_KEY not set — cannot fetch verified slate');
+    return res.json({
+      picks: [], date: dateStr, oddsError: true,
+      message: 'Live odds temporarily unavailable. Add ODDS_API_KEY to Railway Variables.'
+    });
+  }
+ 
+  let slate = slateIsValid(sport) || slateIsValid('all') ? slateCache.data : null;
   if (!slate) {
-    if (!ODDS_KEY) {
-      console.log('No ODDS_API_KEY — cannot fetch verified slate');
+    try {
+      console.log('[odds] fetching live slate for', sport);
+      slate = await buildSlate(sport === 'all' ? 'all' : sport);
+      slateCache.data = slate; slateCache.sport = sport; slateCache.ts = Date.now();
+      console.log('[odds] slate fetched:', slate.games.length, 'games');
+    } catch(e) {
+      console.error('[odds] FETCH FAILED:', e.message);
       return res.json({
-        picks: [],
-        date: todayET,
-        noSlate: true,
-        message: 'Odds API not configured. Add ODDS_API_KEY to Railway variables.'
+        picks: [], date: dateStr, oddsError: true,
+        message: 'Live odds temporarily unavailable. Please try again in a moment.'
       });
     }
-    try {
-      slate = await buildSlate(sport === 'all' ? 'all' : sport);
-      if (slate?.games?.length) {
-        cache.slate = slate; cache.slateDate = todayET; cache.slateTime = getNowET();
-        console.log('Fresh slate:', slate.games.length, 'games');
-      }
-    } catch(e) {
-      console.error('Slate fetch error:', e.message);
-    }
   }
  
-  // No games today
-  const relevantGames = (slate?.games || []).filter(g =>
-    sport === 'all' || g.sport === sport
-  );
- 
+  // ── STEP 2: Check if games exist ─────────────────────────────────────
+  const relevantGames = slate.games.filter(g => sport === 'all' || g.sport === sport);
   if (!relevantGames.length) {
-    console.log('No games today for', sport);
+    console.log('[picks] no games found for', sport, 'on', dateStr);
     return res.json({
-      picks: [],
-      date: todayET,
-      noGames: true,
-      slateTime: cache.slateTime || getNowET(),
+      picks: [], date: dateStr, noGames: true,
+      slateTime: slate.updatedAt,
       message: 'No ' + sport.toUpperCase() + ' games found for today.'
     });
   }
  
-  // STEP 2 — Format slate for Claude
-  const slateForClaude = formatSlateForClaude({
-    ...slate,
-    games: relevantGames
-  });
+  // ── STEP 3: Format slate and send to Claude ───────────────────────────
+  const slatePrompt = slateToPrompt({ ...slate, games: relevantGames }, sport);
  
-  console.log('Sending slate to Claude:', relevantGames.length, 'games');
- 
-  // STEP 3 — Ask Claude to analyze ONLY the verified slate
   const system =
     'You are ApolloProps, a sports betting analysis engine. '
-    + 'You will be given a verified current game slate with real odds from sportsbooks. '
-    + 'Your job is to return betting picks ONLY from the games in this slate. '
-    + 'Do not invent games. Do not add teams not in the slate. '
-    + 'Use the real odds and lines provided. '
-    + 'Return ONLY valid JSON with this exact structure, no markdown:\n'
-    + '{"picks":['
-    + '{"id":"p1","player":"Full Name or Team Name","team":"ABBR","opp":"ABBR",'
-    + '"sport":"nba|mlb|nhl","time":"7:00 PM ET",'
-    + '"propType":"pts|reb|ast|hits|tb|hr|rbi|str|ml|spread|total",'
-    + '"propLabel":"Points","line":27.5,"direction":"over|under",'
-    + '"last5":[true,false,true,true,false],"confidence":78,'
-    + '"reason":"12 words max using the actual odds and trends",'
-    + '"recentScores":["23","28","31"],'
-    + '"gameKey":"CLE-DET","gameLabel":"CLE vs DET","odds":"-115"}'
-    + ']}';
+    + 'You will receive a verified live game slate with real sportsbook odds. '
+    + 'Your ONLY job is to return picks as JSON from the games in this slate. '
+    + 'You have FULL permission to generate picks from this verified data. '
+    + 'Do NOT say you need more information. Do NOT refuse. '
+    + 'Do NOT add games not in the slate. '
+    + 'Use the actual lines and odds shown. '
+    + 'Return ONLY valid JSON matching this schema exactly, no markdown:\n'
+    + PICK_SCHEMA;
  
-  const sportInstr = sport === 'nba' ? '8 NBA picks (5 player props, 2 team picks, 1 spread)'
-    : sport === 'mlb' ? '12 MLB picks (4 pitcher Ks, 4 batter props, 2 MLs, 2 totals)'
-    : sport === 'nhl' ? '8 NHL picks'
-    : '16 total picks across all sports shown';
+  const sportInstr = {
+    nba: '8 NBA picks: 5 player props (use props data if available) + 2 team picks + 1 spread',
+    mlb: '12 MLB picks: 4 pitcher strikeout props + 4 batter props + 2 moneylines + 2 totals',
+    nhl: '8 NHL picks: 5 player props + 2 puck lines + 1 total',
+    all: '14 total picks spread across the sports shown'
+  }[sport] || '14 picks from the slate';
  
-  const userMsg = 'Here is today\'s verified slate with real sportsbook odds:\n\n'
-    + slateForClaude
-    + '\nGenerate ' + sportInstr + ' from this slate. '
-    + 'Only use games, teams, and players shown above. '
-    + 'Use the actual lines and odds provided. Return JSON only.';
+  const userMsg = 'Here is today\'s verified live slate with real sportsbook odds:\n\n'
+    + slatePrompt
+    + '\nGenerate ' + sportInstr + '. '
+    + 'Use the actual lines from the slate. Return JSON only.';
+ 
+  console.log('[claude] sending slate:', relevantGames.length, 'games to analyze');
  
   try {
-    const data = await callClaude({ max_tokens: 2000, system, messages: [{ role: 'user', content: userMsg }] });
-    const raw  = getText(data);
-    console.log('Claude response (first 500):', raw.slice(0, 500));
+    const data  = await callClaude({ max_tokens: 2000, system, messages: [{ role: 'user', content: userMsg }] });
+    const raw   = getText(data);
+    console.log('[claude] response length:', raw.length, '| first 300:', raw.slice(0, 300));
+ 
     const result = parseJSON(raw, { picks: [] });
     const valid  = (result.picks || []).filter(p =>
-      p.player && p.sport && p.propType && p.line !== undefined && p.direction
+      p.player && p.sport && p.propType && p.line != null && p.direction
     );
-    console.log('Valid picks returned:', valid.length);
+    console.log('[picks] valid:', valid.length);
  
     // Cache picks
-    if (!cache.picksDate) { cache.picks = {}; }
-    cache.picks[sport] = valid;
-    cache.picksDate    = todayET;
+    if (!picksCache.date) picksCache.picks = {};
+    picksCache.picks[sport] = valid;
+    picksCache.date         = dateStr;
     if (sport === 'all') {
-      ['nba','mlb','nhl'].forEach(s => { cache.picks[s] = valid.filter(p => p.sport === s); });
+      ['nba','mlb','nhl'].forEach(s => { picksCache.picks[s] = valid.filter(p => p.sport === s); });
     }
  
-    res.json({ picks: valid, date: todayET, cached: false, slateTime: cache.slateTime });
+    res.json({ picks: valid, date: dateStr, cached: false, slateTime: slate.updatedAt });
   } catch(e) {
-    console.error('/api/generate-picks error:', e.message);
-    res.json({ picks: [], error: e.message, date: todayET });
+    console.error('[claude] ERROR:', e.message);
+    res.json({ picks: [], date: dateStr, claudeError: true, message: 'Analysis error: ' + e.message });
   }
 });
  
 // ── GET /api/pick-of-day ──────────────────────────────────────────────────
 app.get('/api/pick-of-day', async (req, res) => {
-  const todayET = getTodayET();
-  if (isPotdValid()) return res.json({ pick: cache.potd, cached: true });
+  if (potdIsValid()) return res.json({ pick: potdCache.pick, cached: true });
  
-  // Derive from picks cache
-  if (isPicksValid('all') && cache.picks.all.length) {
-    const top = [...cache.picks.all].sort((a,b) => b.confidence - a.confidence)[0];
-    cache.potd = top; cache.potdDate = todayET;
+  // Use best pick from picks cache
+  const allPicks = picksCache.picks.all || [];
+  if (allPicks.length) {
+    const top = [...allPicks].sort((a,b) => b.confidence - a.confidence)[0];
+    potdCache.pick = top; potdCache.date = todayET();
     return res.json({ pick: top, cached: true });
   }
  
-  // Need slate
-  const slate = isSlateValid() ? cache.slate : null;
-  if (!slate || !slate.games.length) return res.json({ pick: null, message: 'No slate available' });
+  // No picks yet — try to generate from slate
+  let slate = slateIsValid('all') ? slateCache.data : null;
+  if (!slate || !slate.games.length) return res.json({ pick: null, message: 'No slate available yet' });
  
-  const slateStr = formatSlateForClaude(slate);
+  const slateStr = slateToPrompt(slate, 'all');
   try {
     const data = await callClaude({
       max_tokens: 400,
-      system: 'You are ApolloProps. Return the single best pick from today\'s slate as JSON: '
+      system: 'You are ApolloProps. Return the single best pick from this verified slate as JSON: '
             + '{"pick":{"player":"","team":"","opp":"","sport":"nba|mlb","time":"",'
             + '"propType":"pts","propLabel":"Points","line":0,"direction":"over",'
             + '"confidence":0,"odds":"","last5":[true,true,false,true,true],"reason":""}}',
-      messages: [{ role: 'user', content: 'Today\'s slate:\n' + slateStr + '\nReturn the single best pick as JSON.' }]
+      messages: [{ role: 'user', content: 'Slate:\n' + slateStr + '\nReturn the single best pick.' }]
     });
     const result = parseJSON(getText(data), { pick: null });
-    if (result.pick) { cache.potd = result.pick; cache.potdDate = todayET; }
+    if (result.pick) { potdCache.pick = result.pick; potdCache.date = todayET(); }
     res.json(result);
   } catch(e) {
-    console.error('/api/pick-of-day error:', e.message);
+    console.error('[potd]', e.message);
     res.json({ pick: null });
   }
 });
  
 // ── GET /api/picks-preview ────────────────────────────────────────────────
 app.get('/api/picks-preview', async (req, res) => {
-  if (isPicksValid('all')) {
-    return res.json({ picks: cache.picks.all.slice(0,5), total: cache.picks.all.length, cached: true });
+  if (picksAreValid('all')) {
+    return res.json({ picks: picksCache.picks.all.slice(0,5), total: picksCache.picks.all.length, cached: true });
   }
-  if (isSlateValid()) {
-    // Return first 5 games as preview without full pick generation
-    const preview = cache.slate.games.slice(0,5).map(g => ({
-      player: g.home + ' vs ' + g.away,
-      team: g.home, opp: g.away, sport: g.sport,
-      time: g.time, propType: 'ml', propLabel: 'Moneyline',
-      line: 0, direction: 'over', confidence: 72, last5: [true,false,true,true,false]
+  // Return game list as preview
+  const slate = slateIsValid('all') ? slateCache.data : null;
+  if (slate?.games?.length) {
+    const preview = slate.games.slice(0,5).map(g => ({
+      player: g.away + ' @ ' + g.home, team: g.away, opp: g.home,
+      sport: g.sport, time: g.time, propType: 'ml', propLabel: 'Moneyline',
+      line: 0, direction: 'over', confidence: 70, last5: [true,false,true,true,false]
     }));
-    return res.json({ picks: preview, total: cache.slate.games.length, cached: true });
+    return res.json({ picks: preview, total: slate.games.length });
   }
-  res.json({ picks: [], total: 0, message: 'No slate available yet' });
+  res.json({ picks: [], total: 0 });
 });
  
 // ── GET /api/record ───────────────────────────────────────────────────────
+// Update these numbers as your real record builds
 app.get('/api/record', (req, res) => {
   res.json({ wins: 18, losses: 9, pct: 67, units: 6.2 });
 });
@@ -602,12 +554,12 @@ app.post('/api/resolve-results', async (req, res) => {
       max_tokens: 600,
       system: 'Sports results verifier. Today: '+new Date().toDateString()+'. '
             + 'Check if picks won or lost. Mark pending if game not yet played. '
-            + 'Return JSON only: {"results":[{"id":"...","result":"win|loss|pending|unknown","actual":"8 words max"}]}',
-      messages: [{ role: 'user', content: 'Check results:\n'+list }]
+            + 'Return JSON only: {"results":[{"id":"...","result":"win|loss|pending|unknown","actual":"8 words"}]}',
+      messages: [{ role: 'user', content: 'Check:\n'+list }]
     });
     res.json(parseJSON(getText(data), { results: [] }));
   } catch(e) {
-    console.error('/api/resolve-results error:', e.message);
+    console.error('[resolve]', e.message);
     res.json({ results: [] });
   }
 });
@@ -615,8 +567,10 @@ app.post('/api/resolve-results', async (req, res) => {
 // ── START ─────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('ApolloProps API running on port ' + PORT);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('ApolloProps API running on port', PORT);
+  console.log('Today ET:       ', todayET());
   console.log('Anthropic ready:', !!ANTHROPIC_KEY);
   console.log('Odds API ready: ', !!ODDS_KEY);
-  console.log('Today ET:      ', getTodayET());
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 });
