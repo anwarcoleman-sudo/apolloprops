@@ -255,6 +255,68 @@ function buildPickShells(schedule, sport, date) {
   return shells.slice(0, sport==='all'?18:12);
 }
  
+// ── MERGE LIVE ODDS INTO PICK SHELLS ─────────────────────────────────────
+// Takes real lines from Odds API and updates the pick shells with them
+// so team picks (ML, spread, total) use 100% real market lines
+function mergeOddsIntoShells(shells, oddsData) {
+  if(!oddsData || !oddsData.length) return shells;
+ 
+  return shells.map(pick => {
+    // Find matching game in odds data
+    const game = oddsData.find(g => {
+      const home = g.home_team.toUpperCase();
+      const away = g.away_team.toUpperCase();
+      // Match by team abbreviation
+      return (home.includes(pick.team) || away.includes(pick.team) ||
+              home.includes(pick.opp)  || away.includes(pick.opp));
+    });
+    if(!game) return pick;
+ 
+    const bk = game.bookmakers?.[0];
+    if(!bk) return pick;
+ 
+    // Update team pick lines with real odds
+    if(pick.propType === 'ml'){
+      const ml = bk.markets?.find(m => m.key === 'h2h');
+      if(ml){
+        const outcome = ml.outcomes.find(o => {
+          const name = o.name.toUpperCase();
+          return name.includes(pick.team) || name.includes(pick.player.split(' ')[0].toUpperCase());
+        });
+        if(outcome){
+          pick.odds   = (outcome.price > 0 ? '+' : '') + outcome.price;
+          pick.line   = outcome.price;
+          pick.reason = 'Real market line from sportsbooks';
+        }
+      }
+    }
+ 
+    if(pick.propType === 'spread'){
+      const spread = bk.markets?.find(m => m.key === 'spreads');
+      if(spread){
+        const outcome = spread.outcomes.find(o => {
+          const name = o.name.toUpperCase();
+          return name.includes(pick.team);
+        });
+        if(outcome){
+          pick.line   = outcome.point;
+          pick.odds   = (outcome.price > 0 ? '+' : '') + outcome.price;
+        }
+      }
+    }
+ 
+    if(pick.propType === 'total'){
+      const total = bk.markets?.find(m => m.key === 'totals');
+      if(total && total.outcomes[0]){
+        pick.line   = total.outcomes[0].point;
+        pick.reason = 'Real game total from sportsbooks';
+      }
+    }
+ 
+    return pick;
+  });
+}
+ 
 function clearAtMidnight() {
   const now    = new Date();
   const etNow  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
@@ -471,17 +533,13 @@ app.post('/api/generate-picks', async (req, res) => {
  
   if (sport === 'nba') {
     if (schedule.nba.length) {
-      instructions = 'OUTPUT 8 NBA picks as JSON. Games tonight:\n' + schedule.nba.join('\n') +
-        '\n\nRequired: 5 player props (pts/reb/ast), 2 team picks (ML or total), 1 spread. ' +
-        'Use your knowledge of these players\' recent performance. Estimate lines. Return JSON only.';
+      instructions = 'Enhance these NBA pick shells with confidence scores and reasons.';
     } else {
       instructions = 'There are no NBA games tonight. Return exactly: {"picks":[]}';
     }
   } else if (sport === 'mlb') {
     if (schedule.mlb.length) {
-      instructions = 'OUTPUT 12 MLB picks as JSON. Games today:\n' + schedule.mlb.join('\n') +
-        '\n\nRequired: 4 pitcher strikeout props, 4 batter props (hits/total bases/HR), 2 team moneylines, 2 game totals. ' +
-        'Use your knowledge of starting pitchers and batting trends for these teams. Estimate lines. Return JSON only.';
+      instructions = 'Enhance these MLB pick shells with confidence scores and reasons.';
     } else {
       instructions = 'There are no MLB games today. Return exactly: {"picks":[]}';
     }
@@ -503,10 +561,7 @@ app.post('/api/generate-picks', async (req, res) => {
       const nbaInstr = hasNBA ? '8 NBA picks (5 player props, 2 team picks, 1 spread)' : '0 NBA picks';
       const mlbInstr = hasMLB ? '8 MLB picks (3 pitcher Ks, 3 batter props, 1 ML, 1 total)' : '0 MLB picks';
  
-      instructions = 'OUTPUT picks as JSON. ' + gameList +
-        'Required output: ' + nbaInstr + ' AND ' + mlbInstr + '. ' +
-        'Use your knowledge of these teams and players. Estimate realistic lines. ' +
-        'Do not ask for more data. Do not refuse. Return JSON only.';
+      instructions = 'Enhance these pick shells with confidence scores and reasons.';
     }
   }
  
@@ -514,41 +569,63 @@ app.post('/api/generate-picks', async (req, res) => {
   // line, direction, confidence, reason. It cannot refuse because
   // we are giving it the players and games, not asking it to find them.
   const pickShells = buildPickShells(schedule, sport, todayET);
-  const shellsJSON = JSON.stringify(pickShells, null, 2);
  
+  // If no games today, return empty
+  if(!pickShells.length){
+    return res.json({ picks: [], date: todayET, cached: false });
+  }
+ 
+  // STEP 1: Merge live odds into shells so team picks use 100% real lines
+  const shellsWithOdds = liveOdds ? mergeOddsIntoShells(pickShells, liveOdds) : pickShells;
+  if(liveOdds) console.log('Merged live odds into', pickShells.length, 'pick shells');
+  let finalPicks = shellsWithOdds;
+ 
+  // STEP 2: Try to enhance with Claude — but treat it as optional
+  // If Claude refuses or fails, we still serve the shells
   try {
+    const enhancePrompt = 'You are a JSON data processor. '
+      + 'I will give you an array of sports betting picks. '
+      + 'For each pick, update ONLY these fields based on your knowledge of the player: '
+      + 'confidence (0-100), reason (max 12 words about why this pick is strong), '
+      + 'and last5 (array of 5 booleans for recent hit rate). '
+      + 'Return the complete array as JSON: {"picks":[...]}. '
+      + 'Do not add or remove picks. Do not change player names, lines, or teams. '
+      + 'If you are unsure about a player, keep the existing values unchanged.';
+ 
     const data = await callClaude({
       max_tokens: 1500,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: instructions + '\n\nPick shells to complete:\n' + shellsJSON }]
+      system: enhancePrompt,
+      messages: [{ role: 'user', content: 'Enhance these picks with accurate confidence scores and reasons:\n' + shellsJSON }]
     });
-    const raw   = getText(data);
-    console.log('Raw response (first 400):', raw.slice(0, 400));
+    const raw    = getText(data);
+    console.log('Claude enhance response (first 300):', raw.slice(0,300));
     const result = parseJSON(raw, { picks: [] });
-    // Merge Claude's analysis back onto shells if it returned shells format
-    let valid = (result.picks || []).filter(p =>
+    const enhanced = (result.picks || []).filter(p =>
       p.player && p.sport && p.propType && p.line !== undefined && p.direction
     );
-    // If Claude returned nothing useful, use shells with default values
-    if(!valid.length && pickShells.length){
-      console.log('Claude returned no picks — using shells with defaults');
-      valid = pickShells.filter(p => p.player && p.sport);
+    if(enhanced.length >= pickShells.length * 0.5){
+      // Claude returned enough picks — use enhanced version
+      finalPicks = enhanced;
+      console.log('Using Claude-enhanced picks:', enhanced.length);
+    } else {
+      console.log('Claude enhancement incomplete — using shells directly:', pickShells.length);
     }
-    console.log('Valid picks:', valid.length);
- 
-    // Store in cache
-    if (!isCacheValid()) { cache.date = getTodayET(); cache.picks = {}; }
-    cache.picks[sport] = valid;
-    if (sport === 'all') {
-      ['nba','mlb','nhl'].forEach(s => { cache.picks[s] = valid.filter(p => p.sport === s); });
-    }
-    console.log('Cached', valid.length, 'picks for', sport, 'on', cache.date);
- 
-    res.json({ picks: valid, date: getTodayET(), cached: false });
   } catch(e) {
-    console.error('/api/generate-picks error:', e.message);
-    res.json({ picks: [] });
+    console.log('Claude enhancement failed — using shells directly:', e.message);
   }
+ 
+  const valid = finalPicks;
+  console.log('Valid picks:', valid.length);
+ 
+  // Store in cache
+  if (!isCacheValid()) { cache.date = getTodayET(); cache.picks = {}; }
+  cache.picks[sport] = valid;
+  if (sport === 'all') {
+    ['nba','mlb','nhl'].forEach(s => { cache.picks[s] = valid.filter(p => p.sport === s); });
+  }
+  console.log('Cached', valid.length, 'picks for', sport, 'on', cache.date);
+ 
+  res.json({ picks: valid, date: getTodayET(), cached: false });
 });
  
 // ── GET /api/pick-of-day ──────────────────────────────────────────────────
