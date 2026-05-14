@@ -122,8 +122,8 @@ async function fetchGames(sportKey) {
  
 // Fetch player props for one event (NBA + MLB top games only)
 async function fetchProps(sportKey, eventId, eventLabel) {
-  const markets = sportKey === 'basketball_nba'
-    ? 'player_points,player_rebounds,player_assists'
+  const markets = (sportKey === 'basketball_nba' || sportKey === 'basketball_wnba')
+    ? 'player_points,player_rebounds,player_assists,player_threes'
     : 'batter_hits,batter_total_bases,pitcher_strikeouts,batter_home_runs';
   try {
     const data = await oddsGet(
@@ -155,9 +155,15 @@ async function fetchProps(sportKey, eventId, eventLabel) {
  
 // Build full structured slate for one or all sports
 async function buildSlate(sportFilter) {
-  const sportMap = { nba: 'basketball_nba', mlb: 'baseball_mlb', nhl: 'icehockey_nhl' };
-  const sports   = sportFilter === 'all'
+  const sportMap = { nba: 'basketball_nba', mlb: 'baseball_mlb', nhl: 'icehockey_nhl', wnba: 'basketball_wnba' };
+  // Include wnba in 'all' fetch during WNBA season (May-Sept)
+  const month = new Date().getMonth(); // 0=Jan, 4=May, 8=Sept
+  const wnbaInSeason = month >= 4 && month <= 8;
+  const allSports = wnbaInSeason
     ? Object.entries(sportMap)
+    : Object.entries(sportMap).filter(([k]) => k !== 'wnba');
+  const sports   = sportFilter === 'all'
+    ? allSports
     : [[sportFilter, sportMap[sportFilter]]].filter(([,v]) => v);
  
   const result = { date: todayET(), updatedAt: nowET(), games: [] };
@@ -343,18 +349,21 @@ app.get('/api/schedule', async (req, res) => {
       slateCache.data = slate; slateCache.sport = 'all'; slateCache.ts = Date.now();
     } catch(e) { console.error('[schedule]', e.message); }
   }
-  const nba = (slate?.games||[]).filter(g=>g.sport==='nba');
-  const mlb = (slate?.games||[]).filter(g=>g.sport==='mlb');
-  const nhl = (slate?.games||[]).filter(g=>g.sport==='nhl');
+  const nba  = (slate?.games||[]).filter(g=>g.sport==='nba');
+  const mlb  = (slate?.games||[]).filter(g=>g.sport==='mlb');
+  const nhl  = (slate?.games||[]).filter(g=>g.sport==='nhl');
+  const wnba = (slate?.games||[]).filter(g=>g.sport==='wnba');
   res.json({
     date:      todayET(),
     updatedAt: slate?.updatedAt || null,
     nba:       nba.map(g => g.away+' @ '+g.home+' '+g.time),
     mlb:       mlb.map(g => g.away+' @ '+g.home+' '+g.time),
     nhl:       nhl.map(g => g.away+' @ '+g.home+' '+g.time),
+    wnba:      wnba.map(g => g.away+' @ '+g.home+' '+g.time),
     nbaCount:  nba.length,
     mlbCount:  mlb.length,
-    nhlCount:  nhl.length
+    nhlCount:  nhl.length,
+    wnbaCount: wnba.length
   });
 });
  
@@ -442,10 +451,11 @@ app.post('/api/generate-picks', async (req, res) => {
     + PICK_SCHEMA;
  
   const sportInstr = {
-    nba: '8 NBA picks: 5 player props (use props data if available) + 2 team picks + 1 spread',
-    mlb: '12 MLB picks: 4 pitcher strikeout props + 4 batter props + 2 moneylines + 2 totals',
-    nhl: '8 NHL picks: 5 player props + 2 puck lines + 1 total',
-    all: '14 total picks spread across the sports shown'
+    nba:  '8 NBA picks: 5 player props (pts/reb/ast, use props data) + 2 team picks + 1 spread',
+    mlb:  '12 MLB picks: 4 pitcher strikeout props + 4 batter props + 2 moneylines + 2 totals',
+    nhl:  '8 NHL picks: 5 player props + 2 puck lines + 1 total',
+    wnba: '8 WNBA picks: 5 player props (pts/reb/ast/threes, use props if available) + 2 team ML picks + 1 total. If player props are not in the slate, generate team picks only and note props not yet posted.',
+    all:  '16 total picks spread across the sports shown — NBA, WNBA, MLB, NHL'
   }[sport] || '14 picks from the slate';
  
   const userMsg = 'Here is today\'s verified live slate with real sportsbook odds:\n\n'
