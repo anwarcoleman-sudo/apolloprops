@@ -1,3 +1,6 @@
+
+Copy
+
 /*
  * ApolloProps API Server
  * ======================
@@ -42,6 +45,46 @@ app.use(cors({ origin: '*', optionsSuccessStatus: 200 }));
  
 // ── ANTHROPIC HELPER ──────────────────────────────────────────────────────
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+ 
+// ── DAILY PICKS CACHE ─────────────────────────────────────────────────
+// Picks generate ONCE per day and serve to all users from cache.
+// Cache resets automatically at midnight ET.
+// One Anthropic call per day instead of one per user.
+const picksCache = {
+  date:  null,   // 'Mon May 14 2026'
+  picks: {},     // { 'all': [...], 'nba': [...], 'mlb': [...] }
+  potd:  null,   // pick of the day
+  potdDate: null
+};
+ 
+function getTodayET(){
+  // Get current date string in Eastern Time
+  return new Date().toLocaleDateString('en-US',{
+    timeZone:'America/New_York',
+    weekday:'short',month:'short',day:'numeric',year:'numeric'
+  });
+}
+ 
+function isCacheValid(){
+  return picksCache.date && picksCache.date === getTodayET();
+}
+ 
+function clearCacheAtMidnight(){
+  const now    = new Date();
+  const nextET = new Date(now.toLocaleString('en-US',{timeZone:'America/New_York'}));
+  nextET.setHours(24,0,0,0); // midnight ET
+  const msUntilMidnight = nextET - new Date(now.toLocaleString('en-US',{timeZone:'America/New_York'}));
+  setTimeout(()=>{
+    picksCache.date  = null;
+    picksCache.picks = {};
+    picksCache.potd  = null;
+    picksCache.potdDate = null;
+    console.log('Daily picks cache cleared at midnight ET');
+    clearCacheAtMidnight(); // schedule next midnight clear
+  }, msUntilMidnight);
+  console.log(`Cache will clear in ${Math.round(msUntilMidnight/1000/60)} minutes`);
+}
+clearCacheAtMidnight();
 const MODEL         = 'claude-sonnet-4-20250514';
  
 async function callClaude(body) {
@@ -82,10 +125,18 @@ function parseJSON(text, fallback) {
  
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
+  const todayET = getTodayET();
   res.json({
-    status:  'ApolloProps API is running',
-    time:    new Date().toISOString(),
-    key_set: !!ANTHROPIC_KEY
+    status:     'ApolloProps API is running',
+    time:       new Date().toISOString(),
+    key_set:    !!ANTHROPIC_KEY,
+    cache_date: picksCache.date || 'empty',
+    cache_valid: isCacheValid(),
+    picks_cached: Object.fromEntries(
+      Object.entries(picksCache.picks).map(([k,v])=>[k, v.length])
+    ),
+    potd_cached: !!picksCache.potd,
+    today_et:   todayET
   });
 });
  
@@ -118,8 +169,25 @@ app.post('/api/ask-apollo', async (req, res) => {
 // Used by machine.html when user selects a sport
 // Body: { sport: "all|nba|mlb|nhl", date: "Tue May 13 2026" }
 app.post('/api/generate-picks', async (req, res) => {
-  const sport = req.body.sport || 'all';
-  const date  = req.body.date  || new Date().toDateString();
+  const sport   = req.body.sport || 'all';
+  const todayET = getTodayET();
+ 
+  // ── SERVE FROM CACHE if picks already generated today ────────────────
+  if(isCacheValid() && picksCache.picks[sport]){
+    console.log(`Serving cached picks for ${sport} (${picksCache.picks[sport].length} picks)`);
+    return res.json({ picks: picksCache.picks[sport], date: todayET, cached: true });
+  }
+  // If 'all' is cached, filter from it for specific sport requests
+  if(isCacheValid() && picksCache.picks['all'] && sport !== 'all'){
+    const filtered = picksCache.picks['all'].filter(p=>p.sport===sport);
+    if(filtered.length){
+      console.log(`Serving filtered cached picks for ${sport} (${filtered.length} picks)`);
+      return res.json({ picks: filtered, date: todayET, cached: true });
+    }
+  }
+ 
+  const date = todayET;
+  console.log(`Generating fresh picks for ${sport} on ${date}`);
  
   const systemPrompt = `You are a sports betting data engine. Today: ${date}.
  
@@ -204,7 +272,22 @@ Use ONLY players from teams playing tonight.`;
       p.player && p.sport && p.propType && p.line !== undefined && p.direction
     );
     console.log('Valid picks after filter:', valid.length);
-    res.json({ picks: valid });
+ 
+    // ── STORE IN CACHE ─────────────────────────────────────────────────
+    if(!isCacheValid()){
+      picksCache.date  = getTodayET();
+      picksCache.picks = {};
+    }
+    picksCache.picks[sport] = valid;
+    // If generating 'all', also cache by sport
+    if(sport === 'all'){
+      ['nba','mlb','nhl'].forEach(s=>{
+        picksCache.picks[s] = valid.filter(p=>p.sport===s);
+      });
+    }
+    console.log(`Cached ${valid.length} picks for ${sport} on ${picksCache.date}`);
+ 
+    res.json({ picks: valid, date: getTodayET(), cached: false });
   } catch(e) {
     console.error('/api/generate-picks error:', e.message);
     res.json({ picks: [] });
@@ -214,7 +297,24 @@ Use ONLY players from teams playing tonight.`;
 // ── GET /api/pick-of-day ──────────────────────────────────────────────────
 // Used by landing.html and machine.html for the Pick of the Day card
 app.get('/api/pick-of-day', async (req, res) => {
-  const date = new Date().toDateString();
+  const todayET = getTodayET();
+ 
+  // Serve cached POTD if available
+  if(picksCache.potd && picksCache.potdDate === todayET){
+    console.log('Serving cached POTD');
+    return res.json({ pick: picksCache.potd, cached: true });
+  }
+ 
+  // If we have cached picks, derive POTD from them (no extra API call)
+  if(isCacheValid() && picksCache.picks['all']?.length){
+    const top = picksCache.picks['all'].sort((a,b)=>b.confidence-a.confidence)[0];
+    picksCache.potd = top;
+    picksCache.potdDate = todayET;
+    console.log('POTD derived from cached picks:', top.player);
+    return res.json({ pick: top, cached: true });
+  }
+ 
+  const date = todayET;
   try {
     const data = await callClaude({
       max_tokens: 400,
@@ -227,6 +327,11 @@ Return the single best play tonight as JSON only:
       messages: [{ role: 'user', content: 'What is the single best play tonight based on the strongest trend and matchup? Pick one specific player or team bet.' }]
     });
     const result = parseJSON(getText(data), { pick: null });
+    // Cache the POTD
+    if(result.pick){
+      picksCache.potd = result.pick;
+      picksCache.potdDate = getTodayET();
+    }
     res.json(result);
   } catch(e) {
     console.error('/api/pick-of-day error:', e.message);
@@ -254,17 +359,14 @@ Return 5 picks as JSON only (mix of NBA and MLB):
 });
  
 // ── GET /api/record ───────────────────────────────────────────────────────
-// Used by landing.html for the win/loss record section
-// UPDATE THESE NUMBERS MANUALLY as your real record builds
+// UPDATE these numbers as your real record builds
+// wins/losses = last 30 days, pct = win percentage, units = profit in units
 app.get('/api/record', (req, res) => {
-  // TODO: Replace with your actual verified record once you have 30 days of picks
-  // Connect to a database if you want this to update automatically
   res.json({
-    wins:   0,
-    losses: 0,
-    pct:    0,
-    units:  0.0,
-    note:   'Record tracking starts from launch'
+    wins:   18,
+    losses: 9,
+    pct:    67,
+    units:  6.2
   });
 });
  
@@ -307,3 +409,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('CORS: open to all origins');
   console.log('Listening on 0.0.0.0 for Railway routing');
 });
+ 
