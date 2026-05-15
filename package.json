@@ -1,11 +1,10 @@
 {
   "name": "apolloprops-api",
   "version": "1.0.0",
-  "description": "ApolloProps backend API — proxies Anthropic calls server-side",
+  "description": "ApolloProps backend API",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18.0.0"
