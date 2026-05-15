@@ -386,7 +386,7 @@ function parseJSON(text, fallback) {
   }
 }
  
-const PICK_SCHEMA = '{"picks":[{"id":"p1","player":"Full Name or Team","team":"ABBR","opp":"ABBR","sport":"nba|mlb|nhl|wnba","time":"7:00 PM ET","propType":"pts|reb|ast|hits|tb|hr|rbi|str|ml|spread|total","propLabel":"Points","line":27.5,"direction":"over|under","last5":[true,false,true,true,false],"confidence":78,"reason":"Max 15 words using real odds","recentScores":["23","28"],"gameKey":"CLE-DET","gameLabel":"CLE vs DET","odds":"-115"}]}';
+const PICK_SCHEMA = '{"picks":[{"id":"p1","player":"Full Name or Team","team":"ABBR","opp":"ABBR","sport":"nba|mlb|nhl|wnba","time":"7:00 PM ET","propType":"pts|reb|ast|pra|3pt|hits|tb|hr|rbi|str|sok|ml|spread|total|shots|goals","propLabel":"Points","line":27.5,"direction":"over|under","last5":[true,false,true,true,false],"confidence":78,"reason":"Max 15 words using real odds","recentScores":["23","28"],"gameKey":"CLE-DET","gameLabel":"CLE vs DET","odds":"-115"}]}';
  
 const BAD_NAMES = ['player not listed','unknown','n/a','tbd','undefined','null','not listed','unlisted'];
  
@@ -537,23 +537,29 @@ app.post('/api/generate-picks', async (req, res) => {
   const hasNBA = allGames.some(g => g.sport === 'nba');
  
   const system =
-    'You are ApolloProps, a sports betting analysis engine. '
-    + 'You receive a verified live slate with real sportsbook odds. '
-    + 'Your ONLY job is to return picks as JSON from the games in this slate. '
-    + 'RULES: '
-    + '(1) Only use player names from PROPS sections. Never invent players. '
-    + '(2) If no PROPS for a game, generate team ML/spread/total picks instead. '
-    + '(3) For team picks: player field = full team name. '
-    + '(4) Never say you need more data. Never refuse. Return JSON only:\n'
+    'You are ApolloProps, a sports betting data engine. '
+    + 'You receive a verified live slate with real sportsbook odds and player props. '
+    + 'Your ONLY job is to return as many quality picks as instructed, as JSON. '
+    + 'PROP TYPE RULES — use these exact propType values:\n'
+    + '  pts = player points | reb = rebounds | ast = assists\n'
+    + '  pra = pts+reb+ast combined line | 3pt = three pointers made\n'
+    + '  hits = batter hits | tb = total bases | hr = home runs | rbi = RBI\n'
+    + '  str = pitcher strikeouts | ml = moneyline | spread = point spread | total = game total\n'
+    + 'PLAYER NAME RULES:\n'
+    + '  (1) For player props: use the EXACT player name from the PROPS section.\n'
+    + '  (2) For team picks (ml/spread/total): use full team name e.g. "Cleveland Cavaliers".\n'
+    + '  (3) Never invent player names. Never use "player not listed".\n'
+    + '  (4) If no PROPS listed for a game, generate team ml/spread/total only.\n'
+    + 'OUTPUT RULES: Generate ALL picks requested. Do not stop early. Return JSON only:\n'
     + PICK_SCHEMA;
  
   const sportInstr = {
-    nba:  '8 NBA picks: use PROPS for player picks, ML/spread/total if no props',
-    mlb:  '12 MLB picks: 4 pitcher Ks, 4 batter props (hits/TB/HR), 2 MLs, 2 totals',
-    nhl:  '8 NHL picks: team ML, puck line, totals',
-    wnba: '8 WNBA picks: use PROPS if available, ML/spread/total if not',
-    all:  '14 picks across all sports shown — use props where available'
-  }[sport] || '12 picks from the slate';
+    nba:  'Generate exactly 12 NBA picks. Include all of: player points O/U, player rebounds O/U, player assists O/U, player PRA (pts+reb+ast combined) O/U using propType=pra, player 3-pointers O/U using propType=3pt, team moneyline, team spread, game total. Use player names from PROPS sections.',
+    mlb:  'Generate exactly 16 MLB picks. Include all of: starting pitcher strikeouts O/U using propType=str, batter hits O/U using propType=hits, batter total bases O/U using propType=tb, batter home runs O/U using propType=hr, batter RBI O/U using propType=rbi, team moneyline using propType=ml, team run line using propType=spread, game total runs O/U using propType=total. Use player names from PROPS sections.',
+    nhl:  'Generate exactly 10 NHL picks: team moneylines, puck lines, game totals. Add player shots on goal or goals if PROPS are available.',
+    wnba: 'Generate exactly 12 WNBA picks. Include: player points O/U, player rebounds O/U, player assists O/U, player PRA O/U using propType=pra, team moneyline, game total. Use player names from PROPS if listed.',
+    all:  'Generate picks for every sport in the slate. NBA: 12 picks (pts/reb/ast/pra/3pt/ml/spread/total). MLB: 16 picks (str/hits/tb/hr/rbi/ml/spread/total). WNBA: 12 picks if present (pts/reb/ast/pra/ml/total). Use every prop type available. Generate ALL requested picks — do not stop early.'
+  }[sport] || 'Generate 14 quality picks covering all prop types shown in the slate.';
  
   const userMsg = `Here is today\'s verified slate:\n\n${slateText}`
     + (hasNBA ? `\n${NBA_CONTEXT}\n` : '')
@@ -562,7 +568,7 @@ app.post('/api/generate-picks', async (req, res) => {
   console.log(`[claude] Generating picks for ${sport} — ${allGames.length} games`);
  
   try {
-    const tokens = sport === 'all' ? 3000 : 2000;
+    const tokens = sport === 'all' ? 6000 : sport === 'mlb' ? 4000 : 3000;
     const data   = await callClaude({ max_tokens: tokens, system, messages: [{ role: 'user', content: userMsg }] });
     const raw    = getText(data);
     console.log('[claude] Response length:', raw.length, '| first 200:', raw.slice(0, 200));
@@ -633,6 +639,15 @@ app.get('/api/picks-preview', (req, res) => {
     return res.json({ picks: allCached.slice(0, 5), total: allCached.length, cached: true });
   }
   res.json({ picks: [], total: 0, message: 'No picks cached yet' });
+});
+ 
+// ── GET /api/clear-cache ─────────────────────────────────────────────
+app.get('/api/clear-cache', (req, res) => {
+  Object.keys(picks).forEach(k => delete picks[k]);
+  Object.keys(slates).forEach(k => delete slates[k]);
+  Object.keys(refresh).forEach(k => delete refresh[k]);
+  console.log('[cache] All caches cleared via /api/clear-cache');
+  res.json({ cleared: true, time: nowET() });
 });
  
 // ── GET /api/record ───────────────────────────────────────────────────
