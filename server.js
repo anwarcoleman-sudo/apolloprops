@@ -614,4 +614,72 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('Anthropic ready:', !!ANTHROPIC_KEY);
   console.log('Odds API ready: ', !!ODDS_KEY);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-});
+});const SCHEDULE = {
+ 
+  // ── FRIDAY MAY 15, 2026 ─────────────────────────────────────────
+  // NBA: Two must-win G6 games tonight
+  // MLB: 15 games across the country
+  'Fri, May 15, 2026': {
+    nba: [
+      'DET @ CLE  7:00 PM ET  — Game 6, CLE leads series 3-2 (Donovan Mitchell 28pts avg, Cade Cunningham 25pts avg)',
+      'SAS @ MIN  9:30 PM ET  — Game 6, SAS leads series 3-2 (Anthony Edwards 28+pts avg, De Aaron Fox leads SAS)'
+    ],
+    mlb: [
+      'PIT @ PHI  6:40 PM ET',
+      'BAL @ WSH  6:45 PM ET',
+      'TOR @ DET  6:45 PM ET',
+      'CIN @ CLE  7:10 PM ET',
+      'MIA @ TB   7:10 PM ET',
+      'MIL @ MIN  7:10 PM ET',
+      'BOS @ ATL  7:15 PM ET',
+      'NYY @ NYM  7:15 PM ET',
+      'CHC @ CWS  7:40 PM ET',
+      'TEX @ HOU  8:10 PM ET',
+      'KC  @ STL  8:15 PM ET',
+      'AZ  @ COL  8:40 PM ET',
+      'LAD @ LAA  9:38 PM ET',
+      'SD  @ SEA  9:40 PM ET',
+      'SF  @ ATH  9:40 PM ET'
+    ],
+    wnba: [
+      // WNBA season starts mid-May — check basketball_wnba via Odds API
+    ],
+    nhl: [],
+    notes: 'Big NBA night — both series G6 elimination games. NYY @ NYM subway series.'
+  },
+ 
+  // ── SATURDAY MAY 16, 2026 ───────────────────────────────────────
+  'Sat, May 16, 2026': {
+    nba: [],
+    mlb: [
+      'TOR @ DET  1:10 PM ET',
+      'AZ  @ COL  3:10 PM ET',
+      'BAL @ WSH  4:05 PM ET',
+      'BOS @ ATL  4:05 PM ET',
+      'MIA @ TB   6:10 PM ET',
+      'NYY @ NYM  7:15 PM ET',
+      'TEX @ HOU  8:10 PM ET',
+      'LAD @ LAA  9:38 PM ET',
+      'SD  @ SEA  9:40 PM ET'
+    ],
+    nhl: [],
+    notes: 'No NBA Saturday. G7s if needed are Sunday.'
+  },
+ 
+  // ── SUNDAY MAY 17, 2026 ─────────────────────────────────────────
+  'Sun, May 17, 2026': {
+    nba: [
+      'POSSIBLE G7: DET vs CLE — only if series tied 3-3 after Friday',
+      'POSSIBLE G7: SAS vs MIN — only if series tied 3-3 after Friday'
+    ],
+    mlb: [
+      'NYY @ NYM  1:35 PM ET',
+      'LAD @ LAA  4:07 PM ET',
+      'SD  @ SEA  4:10 PM ET',
+      'AZ  @ COL  3:10 PM ET'
+    ],
+    nhl: [],
+    notes: 'NBA G7s only if series went to 7.'
+  }
+ 
+};
