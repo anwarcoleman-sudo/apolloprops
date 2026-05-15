@@ -117,9 +117,15 @@ async function fetchGames(sportKey) {
     '/sports/' + sportKey + '/odds/'
     + '?regions=us&markets=h2h,spreads,totals&oddsFormat=american&dateFormat=iso'
   );
-  const todayGames = (games || []).filter(g => isToday(g.commence_time));
-  console.log('[odds]', sportKey, '→', games.length, 'total,', todayGames.length, 'today');
-  return todayGames;
+  // Filter: games starting within next 36 hours (catches today + tonight in any timezone)
+  const now = Date.now();
+  const window = 36 * 60 * 60 * 1000;
+  const relevant = (games || []).filter(g => {
+    const t = new Date(g.commence_time).getTime();
+    return t >= now - 3 * 60 * 60 * 1000 && t <= now + window; // started up to 3hrs ago or upcoming 36hrs
+  });
+  console.log('[odds]', sportKey, '→', games.length, 'total,', relevant.length, 'in window');
+  return relevant;
 }
  
 // Fetch player props for one event (NBA + MLB top games only)
@@ -314,16 +320,23 @@ const PICK_SCHEMA = '{"picks":['
  
 // ── HEALTH ────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
+  const fallback = getSchedule(todayET());
   res.json({
-    status:          'ApolloProps API running',
-    time_et:         nowET(),
-    today_et:        todayET(),
-    anthropic_ready: !!ANTHROPIC_KEY,
-    odds_api_ready:  !!ODDS_KEY,
-    slate_cached:    slateIsValid('all'),
-    slate_games:     slateCache.data?.games?.length || 0,
-    slate_age_sec:   slateCache.ts ? Math.round((Date.now() - slateCache.ts) / 1000) : null,
-    picks_cached:    Object.fromEntries(Object.entries(picksCache.picks).map(([k,v])=>[k,v?.length||0]))
+    status:           'ApolloProps API running',
+    time_et:          nowET(),
+    today_et:         todayET(),
+    anthropic_ready:  !!ANTHROPIC_KEY,
+    odds_api_ready:   !!ODDS_KEY,
+    slate_cached:     slateIsValid('all'),
+    slate_games:      slateCache.data?.games?.length || 0,
+    slate_age_sec:    slateCache.ts ? Math.round((Date.now() - slateCache.ts) / 1000) : null,
+    picks_cached:     Object.fromEntries(Object.entries(picksCache.picks).map(([k,v])=>[k,v?.length||0])),
+    schedule_fallback: {
+      nba: fallback.nba?.length || 0,
+      mlb: fallback.mlb?.length || 0,
+      wnba: fallback.wnba?.length || 0,
+      nhl: fallback.nhl?.length || 0
+    }
   });
 });
  
@@ -346,28 +359,47 @@ app.get('/api/slate/today', async (req, res) => {
  
 // ── GET /api/schedule ─────────────────────────────────────────────────────
 app.get('/api/schedule', async (req, res) => {
+  const date = todayET();
+ 
+  // Try live Odds API first
   let slate = slateIsValid('all') ? slateCache.data : null;
   if (!slate && ODDS_KEY) {
     try {
       slate = await buildSlate('all');
       slateCache.data = slate; slateCache.sport = 'all'; slateCache.ts = Date.now();
-    } catch(e) { console.error('[schedule]', e.message); }
+      console.log('[schedule] Live slate loaded:', slate.games.length, 'games');
+    } catch(e) { console.error('[schedule] Odds API error:', e.message); }
   }
-  const nba  = (slate?.games||[]).filter(g=>g.sport==='nba');
-  const mlb  = (slate?.games||[]).filter(g=>g.sport==='mlb');
-  const nhl  = (slate?.games||[]).filter(g=>g.sport==='nhl');
-  const wnba = (slate?.games||[]).filter(g=>g.sport==='wnba');
+ 
+  // Build game lists from live slate
+  let nba  = (slate?.games||[]).filter(g=>g.sport==='nba').map(g=>g.away+' @ '+g.home+'  '+g.time);
+  let mlb  = (slate?.games||[]).filter(g=>g.sport==='mlb').map(g=>g.away+' @ '+g.home+'  '+g.time);
+  let nhl  = (slate?.games||[]).filter(g=>g.sport==='nhl').map(g=>g.away+' @ '+g.home+'  '+g.time);
+  let wnba = (slate?.games||[]).filter(g=>g.sport==='wnba').map(g=>g.away+' @ '+g.home+'  '+g.time);
+  let source = slate ? 'odds-api' : null;
+ 
+  // FALLBACK: if Odds API returned nothing, use our SCHEDULE object
+  if (!nba.length && !mlb.length) {
+    const fallback = getSchedule(date);
+    if (fallback.nba.length || fallback.mlb.length) {
+      nba  = fallback.nba  || [];
+      mlb  = fallback.mlb  || [];
+      nhl  = fallback.nhl  || [];
+      wnba = fallback.wnba || [];
+      source = 'schedule-object';
+      console.log('[schedule] Using SCHEDULE fallback for', date);
+    }
+  }
+ 
+  console.log('[schedule]', date, '| NBA:', nba.length, '| MLB:', mlb.length, '| source:', source||'none');
+ 
   res.json({
-    date:      todayET(),
-    updatedAt: slate?.updatedAt || null,
-    nba:       nba.map(g => g.away+' @ '+g.home+' '+g.time),
-    mlb:       mlb.map(g => g.away+' @ '+g.home+' '+g.time),
-    nhl:       nhl.map(g => g.away+' @ '+g.home+' '+g.time),
-    wnba:      wnba.map(g => g.away+' @ '+g.home+' '+g.time),
-    nbaCount:  nba.length,
-    mlbCount:  mlb.length,
-    nhlCount:  nhl.length,
-    wnbaCount: wnba.length
+    date,
+    updatedAt: slate?.updatedAt || new Date().toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:true})+' ET',
+    source,
+    nba,  mlb,  nhl,  wnba,
+    nbaCount: nba.length, mlbCount: mlb.length,
+    nhlCount: nhl.length, wnbaCount: wnba.length
   });
 });
  
@@ -614,6 +646,27 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('Anthropic ready:', !!ANTHROPIC_KEY);
   console.log('Odds API ready: ', !!ODDS_KEY);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+ 
+  // Auto-warm the slate cache on startup so first user gets instant data
+  if (ODDS_KEY) {
+    setTimeout(async () => {
+      try {
+        console.log("[startup] Pre-fetching slate for " + todayET());
+        const slate = await buildSlate('all');
+        if (slate && slate.games.length) {
+          slateCache.data  = slate;
+          slateCache.sport = 'all';
+          slateCache.ts    = Date.now();
+          console.log('[startup] Slate cached:', slate.games.length, 'games');
+          slate.games.forEach(g => console.log('[startup]', g.sport.toUpperCase(), g.away, '@', g.home, g.time));
+        } else {
+          console.log('[startup] No games found from Odds API — using SCHEDULE fallback');
+        }
+      } catch(e) {
+        console.error('[startup] Slate pre-fetch failed:', e.message);
+      }
+    }, 2000); // 2 second delay after server starts
+  }
 });const SCHEDULE = {
  
   // ── FRIDAY MAY 15, 2026 ─────────────────────────────────────────
