@@ -667,7 +667,9 @@ app.listen(PORT, '0.0.0.0', () => {
       }
     }, 2000); // 2 second delay after server starts
   }
-});const SCHEDULE = {
+});
+ 
+const SCHEDULE = {
  
   // ── FRIDAY MAY 15, 2026 ─────────────────────────────────────────
   // NBA: Two must-win G6 games tonight
@@ -736,3 +738,28 @@ app.listen(PORT, '0.0.0.0', () => {
   }
  
 };
+ 
+function getSchedule(dateStr) {
+  if (SCHEDULE[dateStr]) return SCHEDULE[dateStr];
+  return { nba: [], mlb: [], wnba: [], nhl: [], notes: 'Schedule not available for this date.' };
+}
+ 
+function buildGameContext(dateStr, sport) {
+  const s = getSchedule(dateStr);
+  let ctx = '';
+  if ((sport === 'nba' || sport === 'all') && s.nba.length) {
+    ctx += 'NBA GAMES TODAY:\n' + s.nba.join('\n') + '\n';
+    ctx += 'Series: CLE leads DET 3-2. SAS leads MIN 3-2. OKC swept LAL. NYK swept PHI.\n';
+  } else if (sport === 'nba' || sport === 'all') {
+    ctx += 'NO NBA GAMES TODAY.\n';
+  }
+  if ((sport === 'mlb' || sport === 'all') && s.mlb.length) {
+    ctx += 'MLB GAMES TODAY:\n' + s.mlb.join('\n') + '\n';
+  }
+  if ((sport === 'wnba' || sport === 'all') && s.wnba && s.wnba.length) {
+    ctx += 'WNBA GAMES TODAY:\n' + s.wnba.join('\n') + '\n';
+  }
+  if (s.notes) ctx += 'NOTE: ' + s.notes + '\n';
+  ctx += 'NO NHL games this week.\n';
+  return ctx;
+}
