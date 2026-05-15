@@ -336,7 +336,7 @@ app.get('/api/slate/today', async (req, res) => {
   if (!ODDS_KEY) return res.json({ slate: null, error: 'ODDS_API_KEY not set in Railway Variables' });
   try {
     const slate = await buildSlate(sport);
-    slateCache.data = slate; slateCache.sport = sport; slateCache.ts = Date.now();
+    slateCache.data = slate; slateCache.sport = 'all'; slateCache.ts = Date.now(); // always cache as 'all'
     res.json({ slate, cached: false });
   } catch(e) {
     console.error('[slate] fetch error:', e.message);
@@ -421,7 +421,7 @@ app.post('/api/generate-picks', async (req, res) => {
       // Always cache as 'all' if we fetched multiple sports
       // This prevents a single-sport request from poisoning the cache
       slateCache.data  = slate;
-      slateCache.sport = sportFilter === 'all' ? 'all' : sport;
+      slateCache.sport = 'all';
       slateCache.ts    = Date.now();
       console.log('[odds] slate fetched:', slate.games.length, 'games');
     } catch(e) {
@@ -480,7 +480,8 @@ app.post('/api/generate-picks', async (req, res) => {
   console.log('[claude] sending slate:', relevantGames.length, 'games to analyze');
  
   try {
-    const data  = await callClaude({ max_tokens: 2000, system, messages: [{ role: 'user', content: userMsg }] });
+    const maxTok = sport === 'all' ? 4000 : 2000;
+    const data  = await callClaude({ max_tokens: maxTok, system, messages: [{ role: 'user', content: userMsg }] });
     const raw   = getText(data);
     console.log('[claude] response length:', raw.length, '| first 300:', raw.slice(0, 300));
  
@@ -511,7 +512,7 @@ app.post('/api/generate-picks', async (req, res) => {
     picksCache.picks[sport] = valid;
     picksCache.date         = dateStr;
     if (sport === 'all') {
-      ['nba','mlb','nhl'].forEach(s => { picksCache.picks[s] = valid.filter(p => p.sport === s); });
+      ['nba','mlb','nhl','wnba'].forEach(s => { picksCache.picks[s] = valid.filter(p => p.sport === s); });
     }
  
     res.json({ picks: valid, date: dateStr, cached: false, slateTime: slate.updatedAt });
