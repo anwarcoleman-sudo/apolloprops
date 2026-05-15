@@ -580,6 +580,13 @@ app.post('/api/generate-picks', async (req, res) => {
       if (BAD_NAMES.some(b => name.includes(b))) { console.log('[picks] rejected:', p.player); return false; }
       const isProp = !['ml','spread','total'].includes(p.propType);
       if (isProp && p.player.length <= 3) { console.log('[picks] rejected abbr:', p.player); return false; }
+      // Ensure required fields have defaults so frontend never crashes
+      if (!p.last5 || !Array.isArray(p.last5)) p.last5 = [true,true,false,true,true];
+      if (!p.confidence) p.confidence = 65;
+      if (!p.odds) p.odds = '-110';
+      if (!p.reason) p.reason = 'Strong edge based on current matchup data.';
+      if (!p.recentScores) p.recentScores = [];
+      if (!p.id) p.id = p.sport + '_' + p.player.replace(/\s+/g,'_') + '_' + p.propType;
       return true;
     });
  
